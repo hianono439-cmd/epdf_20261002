@@ -16,6 +16,13 @@ Day1 baseline 학습(scripts/train_baseline_v1.py), Day2 MLflow 학습
   - SEQ_LEN: 20거래일  →  14일 (2주 = 같은 요일이 2번 들어가는 길이)
   - 학습/평가 분할: 앞 80% / 뒤 20% 비율  →  날짜 기준 (2021~2024 학습, 2025 평가)
   - 스케일러: HAICScaler(close, volume)  →  PowerScaler(demand, temp)
+
+➕ [명절·징검다리 추가] 피처 7개 → 9개
+  - 다음날 명절 여부(Myeongjeol): 설·추석 연휴(대체공휴일 포함). 일반 공휴일보다 수요가 훨씬 크게 줄어듦
+  - 다음날 징검다리 여부(Bridge): 평일인데 앞뒤 날이 모두 휴일인 날 (쉬는 사람이 많아 평일보다 수요가 낮음)
+  - 둘 다 달력으로 미리 아는 값이라 예측 시점에 써도 정보 누수가 아님
+  - CSV 에 두 열이 없으면 0 으로 채움 (예전 CSV·API 요청도 그대로 동작)
+  - 채택 근거: 2024 검증 비교 (scripts/calibrate_on_validation.py, 변경내역.md 6장)
 """
 import csv
 import math
@@ -23,7 +30,8 @@ import pickle
 from datetime import date
 
 SEQ_LEN = 14  # 🔧 [전력수요 변경] 20거래일 → 14일 (2주)
-N_FEATURES = 7  # 🔧 [전력수요 변경] (close, volume) 2개 → 7개 (위 docstring 참고)
+USE_HOLIDAY_DETAIL = True  # ➕ [명절·징검다리 추가] False 면 예전 7개 피처 (검증 비교용 스위치)
+N_FEATURES = 9 if USE_HOLIDAY_DETAIL else 7  # ➕ [명절·징검다리 추가] 7 → 9  (🔧 원본 2개 → 7개)
 TEST_START = "2025-01-01"  # 🔧 [전력수요 변경] 이 날짜 이후가 정답인 샘플은 평가(test)용
 
 # 🔧 [전력수요 변경] 냉·난방도일 기준온도 — 팀플 데이터/preprocess.py 가 2021~2024(최종 학습 기간)만으로
@@ -43,10 +51,28 @@ def load_rows(csv_path: str = "data/sample_power_daily.csv") -> list[dict]:
                 "Demand": float(r["Demand"]),
                 "Temp": float(r["Temp"]),
                 "Holiday": int(float(r["Holiday"])),
+                "Myeongjeol": int(float(r.get("Myeongjeol") or 0)),  # ➕ [명절·징검다리 추가] 없으면 0
+                "Bridge": int(float(r.get("Bridge") or 0)),  # ➕ [명절·징검다리 추가] 없으면 0
             }
             for r in reader
         ]
     return rows
+
+
+# ➕ [명절·징검다리 추가] (신규 함수) 학습용 CSV 에 명절·징검다리 열이 있는지 확인.
+#   load_rows 는 예전 CSV 호환을 위해 열이 없으면 0 으로 채우는데, 학습 때 그러면 "플래그가 전부 0"인 채로
+#   조용히 학습돼 버립니다(실제로 예전 업로드 파일로 학습돼 결과가 틀렸던 적이 있음). 그래서 학습 전에 막습니다.
+def require_holiday_detail(csv_path: str) -> None:
+    if not USE_HOLIDAY_DETAIL:
+        return
+    with open(csv_path, encoding="utf-8-sig") as f:
+        header = next(csv.reader(f), [])
+    missing = [c for c in ("Myeongjeol", "Bridge") if c not in header]
+    if missing:
+        raise ValueError(
+            f"{csv_path} 에 {missing} 열이 없습니다. 명절·징검다리 열이 있는 CSV(data/sample_power_daily.csv)를 "
+            "대시보드 Datasets 탭에서 다시 업로드한 뒤 학습하세요."
+        )
 
 
 # 🔧 [전력수요 변경] 날짜·기온에서 파생되는 "예측 시점에 미리 아는" 변수 계산 (신규 함수)
@@ -96,11 +122,12 @@ class PowerScaler:
     def transform_point(self, demand: float, next_day: dict) -> list[float]:
         """
         🔧 [전력수요 변경] (close, volume) → (당일 수요, 다음날 정보 dict)
-        next_day = {"Date": "2025-01-02", "Temp": -1.3, "Holiday": 0}
+        next_day = {"Date": "2025-01-02", "Temp": -1.3, "Holiday": 0, "Myeongjeol": 0, "Bridge": 0}
+        ➕ [명절·징검다리 추가] Myeongjeol·Bridge 는 0/1 이라 정규화 없이 그대로 붙임 (없으면 0)
         """
         temp, hdd, cdd, offday, dsin, dcos = exog_features(next_day["Date"], next_day["Temp"], next_day["Holiday"])
         t_range = self.temp_max - self.temp_min
-        return [
+        point = [
             self._scale(demand, self.demand_min, self.demand_max),
             self._scale(temp, self.temp_min, self.temp_max),
             hdd / t_range,
@@ -109,6 +136,9 @@ class PowerScaler:
             dsin,
             dcos,
         ]
+        if USE_HOLIDAY_DETAIL:  # ➕ [명절·징검다리 추가]
+            point += [float(next_day.get("Myeongjeol", 0)), float(next_day.get("Bridge", 0))]
+        return point
 
     def scale_demand(self, demand: float) -> float:
         """타깃(다음날 수요)을 학습용으로 정규화. (원본 scale_close)"""

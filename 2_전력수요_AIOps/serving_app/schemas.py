@@ -17,6 +17,9 @@ class TargetDay(BaseModel):
     date: Date = Field(..., description="날짜 (YYYY-MM-DD)")
     temp: float = Field(..., ge=-40, le=50, description="전국 인구가중 일평균기온(℃). 예측 대상일은 기상 예보값")
     holiday: int = Field(0, ge=0, le=1, description="공휴일·명절·대체공휴일이면 1 (주말은 날짜로 자동 판단)")
+    # ➕ [명절·징검다리 추가] 기본값 0 이라 예전 요청 형식도 그대로 동작
+    myeongjeol: int = Field(0, ge=0, le=1, description="설·추석 연휴(대체공휴일 포함)면 1")
+    bridge: int = Field(0, ge=0, le=1, description="징검다리: 평일인데 앞뒤 날이 모두 휴일이면 1")
 
 
 class DayRecord(TargetDay):

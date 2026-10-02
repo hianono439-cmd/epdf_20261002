@@ -156,13 +156,13 @@
       <!-- 🔧 [전력수요 변경] 랜덤워크 대신 서버(/data/sample-batch)가 2025년 실제 42일을 잘라 주고, 드리프트 시나리오를 고름 -->
       <p>
         업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 전송합니다.
-        드리프트 배치는 같은 42일에 아래 시나리오의 변화를 덧씌운 것입니다. 최근 28일 RMSE가 75 GWh를 넘으면
+        드리프트 배치는 같은 42일에 아래 시나리오의 변화를 덧씌운 것입니다. 최근 28일 RMSE가 60 GWh를 넘으면
         감지 → 재학습 → (게이트 통과 시) 재배포까지 진행됩니다.
       </p>
     </div>
     <div class="btn-row">
       <select id="scenario-select" class="btn secondary">
-        <option value="ramp">수요 점진 증가 (0 → +25%)</option>
+        <option value="ramp">수요 점진 증가 (0 → +20%)</option><!-- ➕ [명절·징검다리 추가] -->
         <option value="level">수요 일괄 증가 (+15%)</option>
         <option value="temp_bias">기온 센서 오류 (+8℃)</option>
       </select>
@@ -212,7 +212,7 @@
 // 서버(data/features.py, monitoring/drift_detector.py)와 동일한 값 (상수만 복제)
 const SEQ_LEN = 14;          // 🔧 [전력수요 변경] 20 → 14
 const WINDOW_SIZE = 28;      // 🔧 [전력수요 변경] 21 → 28
-const RMSE_THRESHOLD = 75.0; // 🔧 [전력수요 변경] $4 → 75 GWh
+const RMSE_THRESHOLD = 60.0; // 🔧 [전력수요 변경] $4 → GWh 기준  ➕ [명절·징검다리 추가] 75 → 60
 
 let lastPipelineRun = null; // { driftCheck, clientRmse, ts }
 

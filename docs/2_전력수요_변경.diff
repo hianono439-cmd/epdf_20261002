@@ -14,8 +14,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +.claude/
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/data/drift_scenarios.py 2_전력수요_AIOps/data/drift_scenarios.py
 --- 1_빈칸정답_HAIC/data/drift_scenarios.py	1970-01-01 09:00:00
-+++ 2_전력수요_AIOps/data/drift_scenarios.py	2026-10-01 17:13:25
-@@ -0,0 +1,59 @@
++++ 2_전력수요_AIOps/data/drift_scenarios.py	2026-10-02 09:42:37
+@@ -0,0 +1,61 @@
 +"""
 +🔧 [전력수요 변경] (신규 파일) 정상/드리프트 배치 생성 — scripts/simulate_drift.py 와 대시보드(/data/sample-batch)가 공용.
 +
@@ -29,8 +29,9 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +       temp_bias 기온 관측값이 +TEMP_BIAS℃ 틀어짐 (관측소 센서 이상 같은 "입력 데이터" 드리프트)
 +
 +변화 크기는 2025년이 아니라 2024년 검증 데이터로 정했습니다 (scripts/calibrate_on_validation.py,
-+결과: docs/검증기간_보정결과.json). ramp 는 검증 구간 49개 전부에서 기준값(75 GWh)을 넘는 가장 작은 크기(+25%)입니다.
-+(+20%는 92%만 감지. level 은 84%, temp_bias 는 33% 감지 — 기본 시나리오가 아닌 참고용)
++결과: docs/검증기간_보정결과.json). ramp 는 검증 구간 49개 전부에서 기준값(60 GWh)을 넘는 가장 작은 크기(+20%)입니다.
++(level 은 92%, temp_bias 는 61% 감지 — 기본 시나리오가 아닌 참고용)
++➕ [명절·징검다리 추가] 피처 9개·기준값 60 기준으로 다시 계산 (이전: 기준값 75 에서 +25%)
 +"""
 +import random
 +
@@ -39,7 +40,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +
 +BATCH_N = SEQ_LEN + 28  # 14 + 28(WINDOW_SIZE) = 42일 → 배치 하나로 판정 윈도우 28건이 채워짐
 +SCENARIOS = ("ramp", "level", "temp_bias")
-+RAMP_MAX = 0.25   # 검증(2024)에서 정함 — calibrate_on_validation.py 참고
++RAMP_MAX = 0.20   # 검증(2024)에서 정함 — calibrate_on_validation.py 참고  (➕ [명절·징검다리 추가] 0.25 → 0.20)
 +LEVEL_UP = 0.15
 +TEMP_BIAS = 8.0
 +
@@ -72,13 +73,14 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    if kind == "drift":
 +        apply_scenario(rows, scenario)
 +    return [
-+        {"date": r["Date"], "demand": round(r["Demand"], 1), "temp": round(r["Temp"], 2), "holiday": r["Holiday"]}
++        {"date": r["Date"], "demand": round(r["Demand"], 1), "temp": round(r["Temp"], 2), "holiday": r["Holiday"],
++         "myeongjeol": r["Myeongjeol"], "bridge": r["Bridge"]}  # ➕ [명절·징검다리 추가]
 +        for r in rows
 +    ]
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/data/features.py 2_전력수요_AIOps/data/features.py
 --- 1_빈칸정답_HAIC/data/features.py	2026-09-29 13:53:56
-+++ 2_전력수요_AIOps/data/features.py	2026-10-01 17:13:25
-@@ -1,55 +1,88 @@
++++ 2_전력수요_AIOps/data/features.py	2026-10-02 09:45:13
+@@ -1,55 +1,114 @@
  """
 -HAIC 데이터를 LSTM 입력용 시퀀스로 변환하는 공용 유틸리티.
 +전력수요 데이터를 LSTM 입력용 시퀀스로 변환하는 공용 유틸리티.
@@ -103,6 +105,13 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +  - SEQ_LEN: 20거래일  →  14일 (2주 = 같은 요일이 2번 들어가는 길이)
 +  - 학습/평가 분할: 앞 80% / 뒤 20% 비율  →  날짜 기준 (2021~2024 학습, 2025 평가)
 +  - 스케일러: HAICScaler(close, volume)  →  PowerScaler(demand, temp)
++
++➕ [명절·징검다리 추가] 피처 7개 → 9개
++  - 다음날 명절 여부(Myeongjeol): 설·추석 연휴(대체공휴일 포함). 일반 공휴일보다 수요가 훨씬 크게 줄어듦
++  - 다음날 징검다리 여부(Bridge): 평일인데 앞뒤 날이 모두 휴일인 날 (쉬는 사람이 많아 평일보다 수요가 낮음)
++  - 둘 다 달력으로 미리 아는 값이라 예측 시점에 써도 정보 누수가 아님
++  - CSV 에 두 열이 없으면 0 으로 채움 (예전 CSV·API 요청도 그대로 동작)
++  - 채택 근거: 2024 검증 비교 (scripts/calibrate_on_validation.py, 변경내역.md 6장)
  """
  import csv
 +import math
@@ -111,7 +120,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
 -SEQ_LEN = 20  # LSTM 입력 윈도우 길이 (거래일 수) - 약 1개월치 거래일
 +SEQ_LEN = 14  # 🔧 [전력수요 변경] 20거래일 → 14일 (2주)
-+N_FEATURES = 7  # 🔧 [전력수요 변경] (close, volume) 2개 → 7개 (위 docstring 참고)
++USE_HOLIDAY_DETAIL = True  # ➕ [명절·징검다리 추가] False 면 예전 7개 피처 (검증 비교용 스위치)
++N_FEATURES = 9 if USE_HOLIDAY_DETAIL else 7  # ➕ [명절·징검다리 추가] 7 → 9  (🔧 원본 2개 → 7개)
 +TEST_START = "2025-01-01"  # 🔧 [전력수요 변경] 이 날짜 이후가 정답인 샘플은 평가(test)용
  
 +# 🔧 [전력수요 변경] 냉·난방도일 기준온도 — 팀플 데이터/preprocess.py 가 2021~2024(최종 학습 기간)만으로
@@ -135,6 +145,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +                "Demand": float(r["Demand"]),
 +                "Temp": float(r["Temp"]),
 +                "Holiday": int(float(r["Holiday"])),
++                "Myeongjeol": int(float(r.get("Myeongjeol") or 0)),  # ➕ [명절·징검다리 추가] 없으면 0
++                "Bridge": int(float(r.get("Bridge") or 0)),  # ➕ [명절·징검다리 추가] 없으면 0
              }
              for r in reader
          ]
@@ -142,6 +154,22 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
  
 -class HAICScaler:
++# ➕ [명절·징검다리 추가] (신규 함수) 학습용 CSV 에 명절·징검다리 열이 있는지 확인.
++#   load_rows 는 예전 CSV 호환을 위해 열이 없으면 0 으로 채우는데, 학습 때 그러면 "플래그가 전부 0"인 채로
++#   조용히 학습돼 버립니다(실제로 예전 업로드 파일로 학습돼 결과가 틀렸던 적이 있음). 그래서 학습 전에 막습니다.
++def require_holiday_detail(csv_path: str) -> None:
++    if not USE_HOLIDAY_DETAIL:
++        return
++    with open(csv_path, encoding="utf-8-sig") as f:
++        header = next(csv.reader(f), [])
++    missing = [c for c in ("Myeongjeol", "Bridge") if c not in header]
++    if missing:
++        raise ValueError(
++            f"{csv_path} 에 {missing} 열이 없습니다. 명절·징검다리 열이 있는 CSV(data/sample_power_daily.csv)를 "
++            "대시보드 Datasets 탭에서 다시 업로드한 뒤 학습하세요."
++        )
++
++
 +# 🔧 [전력수요 변경] 날짜·기온에서 파생되는 "예측 시점에 미리 아는" 변수 계산 (신규 함수)
 +def exog_features(date_str: str, temp: float, holiday: int) -> list[float]:
 +    """하루치 외생변수 → [기온, 난방도일, 냉방도일, 휴일여부, 요일 sin, 요일 cos] (스케일 전)"""
@@ -192,21 +220,23 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
          return self
  
      def _scale(self, value: float, lo: float, hi: float) -> float:
-@@ -60,51 +93,78 @@
+@@ -60,51 +119,82 @@
      def _unscale(self, value: float, lo: float, hi: float) -> float:
          return value * (hi - lo) + lo
  
 -    def transform_point(self, close: float, volume: float) -> list[float]:
+-        return [
+-            self._scale(close, self.close_min, self.close_max),
+-            self._scale(volume, self.volume_min, self.volume_max),
 +    def transform_point(self, demand: float, next_day: dict) -> list[float]:
 +        """
 +        🔧 [전력수요 변경] (close, volume) → (당일 수요, 다음날 정보 dict)
-+        next_day = {"Date": "2025-01-02", "Temp": -1.3, "Holiday": 0}
++        next_day = {"Date": "2025-01-02", "Temp": -1.3, "Holiday": 0, "Myeongjeol": 0, "Bridge": 0}
++        ➕ [명절·징검다리 추가] Myeongjeol·Bridge 는 0/1 이라 정규화 없이 그대로 붙임 (없으면 0)
 +        """
 +        temp, hdd, cdd, offday, dsin, dcos = exog_features(next_day["Date"], next_day["Temp"], next_day["Holiday"])
 +        t_range = self.temp_max - self.temp_min
-         return [
--            self._scale(close, self.close_min, self.close_max),
--            self._scale(volume, self.volume_min, self.volume_max),
++        point = [
 +            self._scale(demand, self.demand_min, self.demand_max),
 +            self._scale(temp, self.temp_min, self.temp_max),
 +            hdd / t_range,
@@ -215,6 +245,9 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +            dsin,
 +            dcos,
          ]
++        if USE_HOLIDAY_DETAIL:  # ➕ [명절·징검다리 추가]
++            point += [float(next_day.get("Myeongjeol", 0)), float(next_day.get("Bridge", 0))]
++        return point
  
 -    def scale_close(self, close: float) -> float:
 -        """타깃(다음날 종가)을 학습용으로 정규화. 입력 시퀀스와 같은 스케일을 써야
@@ -296,7 +329,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
      return X[:split_idx], y[:split_idx], X[split_idx:], y[split_idx:]
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/data/storage.py 2_전력수요_AIOps/data/storage.py
 --- 1_빈칸정답_HAIC/data/storage.py	2026-09-29 13:52:58
-+++ 2_전력수요_AIOps/data/storage.py	2026-10-01 16:53:55
++++ 2_전력수요_AIOps/data/storage.py	2026-10-02 09:40:36
 @@ -1,16 +1,25 @@
  """
 -업로드된 HAIC 데이터 파일 관리.
@@ -320,7 +353,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
  UPLOAD_DIR = "data/uploads"
 +OBSERVED_PATH = "data/observed/observed.csv"  # 🔧 [전력수요 변경] 신규
-+OBSERVED_COLUMNS = ["Date", "Demand", "Temp", "Holiday"]  # 🔧 [전력수요 변경] 신규
++OBSERVED_COLUMNS = ["Date", "Demand", "Temp", "Holiday", "Myeongjeol", "Bridge"]  # 🔧 [전력수요 변경] 신규 (➕ [명절·징검다리 추가] 두 열)
  
  
  def latest_upload(upload_dir: str = UPLOAD_DIR) -> str:
@@ -345,7 +378,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +        if is_new:
 +            writer.writeheader()
 +        for r in records:
-+            writer.writerow({k: r[k] for k in OBSERVED_COLUMNS})
++            writer.writerow({k: r.get(k, 0) for k in OBSERVED_COLUMNS})  # ➕ [명절·징검다리 추가] 없는 열은 0
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/aggregate_metrics.py 2_전력수요_AIOps/scripts/aggregate_metrics.py
 --- 1_빈칸정답_HAIC/scripts/aggregate_metrics.py	1970-01-01 09:00:00
 +++ 2_전력수요_AIOps/scripts/aggregate_metrics.py	2026-10-02 09:15:58
@@ -420,13 +453,14 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    print(json.dumps(aggregate(sys.argv[1] if len(sys.argv) > 1 else "5m"), ensure_ascii=False, indent=2))
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/calibrate_on_validation.py 2_전력수요_AIOps/scripts/calibrate_on_validation.py
 --- 1_빈칸정답_HAIC/scripts/calibrate_on_validation.py	1970-01-01 09:00:00
-+++ 2_전력수요_AIOps/scripts/calibrate_on_validation.py	2026-10-01 17:12:26
-@@ -0,0 +1,178 @@
++++ 2_전력수요_AIOps/scripts/calibrate_on_validation.py	2026-10-02 09:41:06
+@@ -0,0 +1,211 @@
 +"""
 +🔧 [전력수요 변경] (신규 파일) 검증 기간(2024)으로 하이퍼파라미터·기준값을 정하는 스크립트.
 +
 +2025년은 마지막 평가에만 써야 하므로, 아래 결정은 모두 2024년 검증 데이터로 합니다.
 +    학습 2021~2023  →  검증 2024  (스케일러도 2021~2023으로만 fit)
++    0) 피처 비교        : 7개(기존) vs 9개(➕ 명절·징검다리 추가) — 검증 RMSE 가 0.5 GWh 이상 좋아질 때만 채택
 +    1) 모델 크기 비교   : LSTM (32,32,16) vs (64,32,16)
 +    2) 기준값(RMSE)     : 2024년 28일 구간별 RMSE 최댓값을 5 GWh 단위로 올림
 +                          → drift_detector.RMSE_THRESHOLD, train_and_register.RMSE_GATE 에 사용
@@ -451,7 +485,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +
 +from data import features
 +from data.drift_scenarios import apply_scenario
-+from data.features import SEQ_LEN, N_FEATURES, PowerScaler, build_sequences, load_rows
++from data.features import SEQ_LEN, PowerScaler, build_sequences, load_rows  # ➕ N_FEATURES 대신 X.shape[2] 사용
 +
 +TRAIN_END = "2024-01-01"  # 이 날짜 전 = 학습
 +VAL_END = "2025-01-01"  # 이 날짜 전 = 검증 (2025는 읽기만 하고 쓰지 않음)
@@ -460,10 +494,10 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +OUT_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "검증기간_보정결과.json")
 +
 +
-+def build(units):
++def build(units, n_features):  # ➕ [명절·징검다리 추가] 입력 피처 수를 인자로 (7 / 9 비교용)
 +    model = keras.Sequential(
 +        [
-+            keras.layers.Input(shape=(SEQ_LEN, N_FEATURES)),
++            keras.layers.Input(shape=(SEQ_LEN, n_features)),
 +            keras.layers.LSTM(units[0], return_sequences=True),
 +            keras.layers.LSTM(units[1], return_sequences=True),
 +            keras.layers.LSTM(units[2]),
@@ -516,11 +550,42 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +          f"| 현재 설정 HDD {features.HDD_BASE} / CDD {features.CDD_BASE}")
 +
 +    scaler = PowerScaler().fit(train_rows)
-+    X, y, dates = build_sequences(rows, scaler)
-+    split = next(k for k, d in enumerate(dates) if d >= TRAIN_END)
-+    X = np.array(X, dtype="float32")
-+    X_tr, X_val = X[:split], X[split:]
-+    y_tr, y_val = np.array(y[:split]), np.array(y[split:])
++
++    def prepare(use_detail: bool):
++        features.USE_HOLIDAY_DETAIL = use_detail  # ➕ 피처 7개 / 9개 전환
++        X, y, dates = build_sequences(rows, scaler)
++        split = next(k for k, d in enumerate(dates) if d >= TRAIN_END)
++        X = np.array(X, dtype="float32")
++        return X[:split], X[split:], np.array(y[:split]), np.array(y[split:]), dates, split
++
++    # ➕ [명절·징검다리 추가] 0) 피처 비교 — 같은 모델 (32,32,16), 같은 시드
++    by_date = {r["Date"]: r for r in rows}
++    feat_results = {}
++    for use_detail in (False, True):
++        X_tr, X_val, y_tr, y_val, dates, split = prepare(use_detail)
++        y_tr_s = np.array([scaler.scale_demand(v) for v in y_tr], dtype="float32")
++        keras.utils.set_random_seed(42)
++        m0 = build((32, 32, 16), X_tr.shape[2])
++        m0.fit(X_tr, y_tr_s, epochs=EPOCHS, verbose=0)
++        p0 = np.array([scaler.inverse_demand(v) for v in m0.predict(X_val, verbose=0).flatten()])
++        special = [k for k, d in enumerate(dates[split:]) if by_date[d]["Myeongjeol"] or by_date[d]["Bridge"]]
++        key = f"{X_tr.shape[2]}개"
++        feat_results[key] = {
++            "rmse": rmse(y_val, p0), "mape": mape(y_val, p0),
++            "special_days_mae": float(np.mean(np.abs(y_val[special] - p0[special]))) if special else None,
++            "special_days": [dates[split + k] for k in special],
++            "special_days_error": [round(float(y_val[k] - p0[k]), 1) for k in special],
++        }
++        r_ = feat_results[key]
++        print(f"[0] 피처 {key}: 검증 RMSE {r_['rmse']:.1f} GWh, MAPE {r_['mape']:.2f}%, "
++              f"명절·징검다리 {len(special)}일 평균 절대오차 {r_['special_days_mae']:.1f} GWh")
++    use_detail = feat_results["9개"]["rmse"] < feat_results["7개"]["rmse"] - 0.5
++    print(f"    → 채택: {'9개 (명절·징검다리 포함)' if use_detail else '7개 (기존 유지)'}")
++    for d_, e7, e9 in zip(feat_results["9개"]["special_days"], feat_results["7개"]["special_days_error"],
++                          feat_results["9개"]["special_days_error"]):
++        print(f"      {d_}  오차(실제-예측)  7개 {e7:+7.1f}  →  9개 {e9:+7.1f}")
++
++    X_tr, X_val, y_tr, y_val, dates, split = prepare(use_detail)
 +    y_tr_s = np.array([scaler.scale_demand(v) for v in y_tr], dtype="float32")
 +    print(f"학습 {len(X_tr)}개 ({dates[0]}~{dates[split - 1]}) / 검증 {len(X_val)}개 ({dates[split]}~{dates[-1]})")
 +
@@ -528,7 +593,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    results, models = {}, {}
 +    for units in [(32, 32, 16), (64, 32, 16)]:
 +        keras.utils.set_random_seed(42)
-+        m = build(units)
++        m = build(units, X_tr.shape[2])
 +        m.fit(X_tr, y_tr_s, epochs=EPOCHS, verbose=0)
 +        pred = np.array([scaler.inverse_demand(v) for v in m.predict(X_val, verbose=0).flatten()])
 +        results[str(units)] = {"rmse": rmse(y_val, pred), "mape": mape(y_val, pred)}
@@ -586,6 +651,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +        "split": {"train": f"{dates[0]}~{dates[split - 1]}", "validation": f"{dates[split]}~{dates[-1]}",
 +                  "test(미사용)": "2025-01-01~2025-12-31"},
 +        "degree_day_bases_2021_2023": {"HDD": hb, "CDD": cb, "r2": r2},
++        "feature_comparison": feat_results, "use_holiday_detail": use_detail,  # ➕ [명절·징검다리 추가]
 +        "model_size": results, "chosen_units": list(chosen), "naive": naive,
 +        "rolling28_rmse": {"median": float(np.median(roll)), "p95": float(np.percentile(roll, 95)),
 +                           "max": float(roll.max()), "max_window_end": worst_end},
@@ -602,7 +668,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    main()
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/simulate_drift.py 2_전력수요_AIOps/scripts/simulate_drift.py
 --- 1_빈칸정답_HAIC/scripts/simulate_drift.py	2026-10-01 16:49:51
-+++ 2_전력수요_AIOps/scripts/simulate_drift.py	2026-10-01 17:13:25
++++ 2_전력수요_AIOps/scripts/simulate_drift.py	2026-10-02 09:42:37
 @@ -1,16 +1,22 @@
  """
 -Day3 드리프트 감지 시뮬레이션 (119~123번 슬라이드).
@@ -615,8 +681,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -    4) 드리프트 데이터 주입 - 생성한 데이터를 서빙 서버에 연속 요청으로 전송
 -    5) 결과 관찰       - RMSE 상승 -> 알림 로그 발생 -> 재학습 트리거 확인
 +    1) 기준 통계 산출   - 학습에 쓴 데이터(2021~2024)의 일 수요 평균·표준편차 계산
-+    2) 정상 입력 테스트 - 학습에 안 쓴 2025년 실제 42일 → RMSE 75 GWh 이내 확인 (베이스라인)
-+    3) 드리프트 데이터 생성 - 같은 실제 42일에 수요 점진 증가(0→+25%) 등 인위적 변화 적용
++    2) 정상 입력 테스트 - 학습에 안 쓴 2025년 실제 42일 → RMSE 60 GWh 이내 확인 (베이스라인)
++    3) 드리프트 데이터 생성 - 같은 실제 42일에 수요 점진 증가(0→+20%) 등 인위적 변화 적용
 +    4) 드리프트 데이터 주입 - 생성한 데이터를 서빙 서버에 요청으로 전송
 +    5) 결과 관찰       - RMSE 상승 -> 알림 로그 -> 재학습 트리거 -> 새 버전 승격 확인
  
@@ -732,7 +798,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  if __name__ == "__main__":
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/train_baseline_v1.py 2_전력수요_AIOps/scripts/train_baseline_v1.py
 --- 1_빈칸정답_HAIC/scripts/train_baseline_v1.py	2026-10-01 16:49:42
-+++ 2_전력수요_AIOps/scripts/train_baseline_v1.py	2026-10-01 17:13:25
++++ 2_전력수요_AIOps/scripts/train_baseline_v1.py	2026-10-02 09:45:13
 @@ -1,33 +1,26 @@
  """
  [Day1 사전 준비] 로컬 baseline 모델 만들기  —  scripts/train_baseline_v1.py
@@ -772,11 +838,11 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +   - 학습 2021~2024 / 평가 2025 (날짜 기준 분할, 원본은 앞 80% / 뒤 20%)
 +   - 스케일러를 "학습 기간(2025 이전)" 데이터로만 fit
 +     (원본은 전체 데이터로 fit → 평가 구간의 최소·최대가 학습에 새어 들어감)
-+   - RMSE 단위 달러 → GWh, 게이트 $4.00 → 75 GWh, MAPE(%)와 기준선(어제/지난주 같은 요일)도 함께 출력
++   - RMSE 단위 달러 → GWh, 게이트 $4.00 → 60 GWh, MAPE(%)와 기준선(어제/지난주 같은 요일)도 함께 출력
  """
  import os
  import sys
-@@ -35,83 +28,88 @@
+@@ -35,83 +28,91 @@
  sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
  
  # 이 파일에서 쓰는 도구들 (모두 이미 만들어져 있습니다)
@@ -792,6 +858,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  #   build_model      : LSTM 모델 뼈대 만들기
 -from data.features import load_rows, build_sequences, train_test_split, HAICScaler
 +from data.features import load_rows, build_sequences, train_test_split, PowerScaler, TEST_START  # 🔧 [전력수요 변경]
++from data.features import require_holiday_detail  # ➕ [명절·징검다리 추가]
  from data.storage import latest_upload
  from serving_app.lstm_model import build_model
  
@@ -799,7 +866,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +MODEL_PATH = "serving_app/models/power_v1.keras"  # 🔧 [전력수요 변경] haic_v1.keras → power_v1.keras
  SCALER_PATH = "serving_app/models/scaler.pkl"
  BASE_EPOCHS = 100  # 전체 문제를 100번 반복해서 학습
-+RMSE_GATE = 75.0  # 🔧 [전력수요 변경] $4.00 → 75 GWh (2024 검증으로 정한 값, train_and_register.py 와 같음)
++RMSE_GATE = 60.0  # 🔧 [전력수요 변경] $4.00 → GWh 기준 (2024 검증으로 정함, train_and_register.py 와 같음)  ➕ [명절·징검다리 추가] 75 → 60
  
  
  def rmse(y_true, y_pred) -> float:
@@ -818,11 +885,14 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    from tensorflow import keras
  
 -    # STEP 1. 데이터 읽기 — 가장 최근 업로드한 CSV를 행 목록으로 (756행)
+-    rows = load_rows(latest_upload())
 +    keras.utils.set_random_seed(42)  # 🔧 [전력수요 변경] 재현성을 위해 시드 고정 (train_and_register.py 와 동일)
-+
-+    # STEP 1. 데이터 읽기 — 가장 최근 업로드한 CSV를 행 목록으로 (2021~2025, 1,826행)
-     rows = load_rows(latest_upload())
  
++    # STEP 1. 데이터 읽기 — 가장 최근 업로드한 CSV를 행 목록으로 (2021~2025, 1,826행)
++    csv_path = latest_upload()
++    require_holiday_detail(csv_path)  # ➕ [명절·징검다리 추가] 열이 없으면 학습 중단
++    rows = load_rows(csv_path)
++
      # STEP 2. 스케일러 만들고 저장하기
 -    #   종가(100~200)와 거래량(100만 단위)은 크기 차이가 너무 커서, 그대로 넣으면
 -    #   LSTM이 큰 숫자(거래량)에만 끌려갑니다. 그래서 둘 다 0~1로 맞춰 줍니다.
@@ -934,8 +1004,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/lstm_model.py 2_전력수요_AIOps/serving_app/lstm_model.py
 --- 1_빈칸정답_HAIC/serving_app/lstm_model.py	2026-09-16 20:20:49
-+++ 2_전력수요_AIOps/serving_app/lstm_model.py	2026-10-01 17:13:33
-@@ -1,17 +1,14 @@
++++ 2_전력수요_AIOps/serving_app/lstm_model.py	2026-10-02 09:42:37
+@@ -1,17 +1,15 @@
  """
 -HAIC 다음날 종가 예측용 LSTM 아키텍처 (Day1 baseline과 Day2 MLflow 학습이 공유).
 +다음날 전력수요 예측용 LSTM 아키텍처 (Day1 baseline과 Day2 MLflow 학습이 공유).
@@ -948,7 +1018,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +🔧 [전력수요 변경] 층 구성은 교수님 원본(LSTM 32 → 32 → 16 + Dense 16 + Dense 1)을 그대로 두고,
 +   입력 모양만 (20, 2) → (SEQ_LEN=14, N_FEATURES=7) 로 바꿨습니다.
 +   크기는 2025년(테스트)이 아니라 2024년 검증 데이터로 골랐습니다 (scripts/calibrate_on_validation.py):
-+   2021~2023 학습 → 2024 검증 RMSE  (32,32,16) 43.5 GWh  vs  (64,32,16) 44.1 GWh → 차이가 없어 원본 크기 유지
++   2021~2023 학습 → 2024 검증 RMSE  (32,32,16) 40.4 GWh  vs  (64,32,16) 41.7 GWh → 원본 크기 유지
++   (➕ [명절·징검다리 추가] 9개 피처 기준. 7개 피처일 때도 43.5 vs 44.1 로 같은 결론)
  """
  from tensorflow import keras
  
@@ -1254,8 +1325,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    _model_cache = None
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/monitoring/drift_detector.py 2_전력수요_AIOps/serving_app/monitoring/drift_detector.py
 --- 1_빈칸정답_HAIC/serving_app/monitoring/drift_detector.py	2026-10-01 16:49:42
-+++ 2_전력수요_AIOps/serving_app/monitoring/drift_detector.py	2026-10-01 17:13:25
-@@ -1,60 +1,37 @@
++++ 2_전력수요_AIOps/serving_app/monitoring/drift_detector.py	2026-10-02 09:42:37
+@@ -1,60 +1,38 @@
  """
  [Day3] 드리프트 감지  —  serving_app/monitoring/drift_detector.py
 -【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
@@ -1265,7 +1336,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -   "최근 모델이 평균 몇 달러씩 틀리고 있는지(RMSE)"를 계산해서,
 -   4달러보다 많이 틀리면 "데이터가 달라졌다(드리프트)"고 판단합니다.
 +   "최근 모델이 평균 몇 GWh씩 틀리고 있는지(RMSE)"를 계산해서,
-+   75 GWh보다 많이 틀리면 "데이터가 달라졌다(드리프트)"고 판단합니다.
++   60 GWh보다 많이 틀리면 "데이터가 달라졌다(드리프트)"고 판단합니다.
  
 -■ 드리프트가 뭔가요?
 -   모델은 과거 데이터로 공부했습니다. 그런데 시장 상황이 갑자기 바뀌면(예: 변동성 폭증)
@@ -1276,21 +1347,22 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -   최근 21건(약 한 달 거래일)의 RMSE > $4.00  →  드리프트!
 -   · 21건보다 짧으면 : 우연한 한두 번 실수에도 경보가 울립니다.
 -   · 21건보다 길면   : 상황이 바뀌어도 늦게 알아챕니다.
-+   최근 28건(4주)의 RMSE > 75 GWh  →  드리프트!
++   최근 28건(4주)의 RMSE > 60 GWh  →  드리프트!
  
 -■ 이 파일의 빈칸 : [빈칸 7] compute_rmse   [빈칸 8] is_drift
 +■ 빈칸 정답 위치 : [빈칸 7] compute_rmse   [빈칸 8] is_drift
 +
 +🔧 [전력수요 변경] 요약
-+   - RMSE_THRESHOLD : $4.00 → 75 GWh
++   - RMSE_THRESHOLD : $4.00 → 60 GWh
 +       근거: 2025년(테스트)은 쓰지 않고 2024년 "검증" 데이터로 정했습니다 (scripts/calibrate_on_validation.py).
-+             2021~2023으로 학습한 모델의 2024년 28일 구간별 RMSE: 중앙값 42.5 / 95% 61.6 / 최댓값 71.1 GWh
-+             (최댓값은 추석·개천절 연휴가 낀 10월 초) → 5 단위로 올려 75 를 넘으면 "평소와 다른" 상태
++             2021~2023으로 학습한 모델의 2024년 28일 구간별 RMSE: 중앙값 39.9 / 95% 52.6 / 최댓값 55.3 GWh
++             (최댓값은 추석·개천절 연휴가 낀 10월 초) → 5 단위로 올려 60 을 넘으면 "평소와 다른" 상태
++             ➕ [명절·징검다리 추가] 명절·징검다리 피처로 오차가 줄어 75 → 60 (이전 7개 피처: 중앙값 42.5 / 최댓값 71.1 → 75)
 +   - WINDOW_SIZE    : 21거래일 → 28일 (4주 — 요일이 정확히 4번씩 들어가 요일 편향이 없음)
  """
 -RMSE_THRESHOLD = 4.00  # 이보다 많이 틀리면 드리프트
 -WINDOW_SIZE = 21       # 최근 21건을 봅니다
-+RMSE_THRESHOLD = 75.0  # 🔧 [전력수요 변경] 4.00 달러 → 75 GWh (2024 검증으로 정함)
++RMSE_THRESHOLD = 60.0  # 🔧 [전력수요 변경] 4.00 달러 → GWh 기준 (2024 검증으로 정함)  ➕ [명절·징검다리 추가] 75 → 60
 +WINDOW_SIZE = 28       # 🔧 [전력수요 변경] 21 → 28 (4주)
  
  
@@ -1332,12 +1404,12 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
      # ✅ [빈칸 7 정답] ① 오차 = 실제 - 예측,  ③ 평균 = 합 ÷ 개수
      errors_sq = [(p["actual"] - p["predicted"]) ** 2 for p in recent_predictions]
      return math.sqrt(sum(errors_sq) / len(errors_sq))
-@@ -63,15 +40,9 @@
+@@ -63,15 +41,9 @@
  def is_drift(recent_predictions: list[dict]) -> bool:
      """
      드리프트인지 True/False 로 판단합니다.
 -    흐름: (데이터 충분한가?) → 최근 21건만 골라서 → RMSE 계산 → 기준($4)보다 크면 드리프트
-+    흐름: (데이터 충분한가?) → 최근 28건만 골라서 → RMSE 계산 → 기준(75 GWh)보다 크면 드리프트
++    흐름: (데이터 충분한가?) → 최근 28건만 골라서 → RMSE 계산 → 기준(60 GWh)보다 크면 드리프트
      """
 -    # ════════════════════════════ [빈칸 8] ════════════════════════════
 -    # "아직 판단하지 않는다(False)"로 끝내야 하는 조건을 채우세요.
@@ -1410,7 +1482,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    return out
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/monitoring/retrain_trigger.py 2_전력수요_AIOps/serving_app/monitoring/retrain_trigger.py
 --- 1_빈칸정답_HAIC/serving_app/monitoring/retrain_trigger.py	2026-10-01 16:49:42
-+++ 2_전력수요_AIOps/serving_app/monitoring/retrain_trigger.py	2026-10-02 09:16:17
++++ 2_전력수요_AIOps/serving_app/monitoring/retrain_trigger.py	2026-10-02 09:42:37
 @@ -1,30 +1,33 @@
  """
  [Day3] 드리프트 → 자동 재학습  —  serving_app/monitoring/retrain_trigger.py
@@ -1426,8 +1498,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -   드리프트 감지(RMSE > $4) → 경고 로그 → 최근 데이터 가져오기 → fine-tuning
 -     → 시험 통과(RMSE ≤ $4)? ─ 예   → 새 버전을 Production 으로 승격 + 성공 로그
 -                             └ 아니오 → 기존 Production 그대로 유지 (서비스는 멈추지 않음)
-+   드리프트 감지(RMSE > 75 GWh) → 경고 로그 → 최근 관측 데이터 가져오기 → fine-tuning
-+     → 시험 통과(RMSE ≤ 75 GWh 이고 기존 모델보다 좋음)? ─ 예   → 새 버전 Production 승격 + 성공 로그 + 모델 캐시 교체
++   드리프트 감지(RMSE > 60 GWh) → 경고 로그 → 최근 관측 데이터 가져오기 → fine-tuning
++     → 시험 통과(RMSE ≤ 60 GWh 이고 기존 모델보다 좋음)? ─ 예   → 새 버전 Production 승격 + 성공 로그 + 모델 캐시 교체
 +                                                          └ 아니오 → 기존 Production 그대로 유지
  
 -■ 확인 방법
@@ -1547,7 +1619,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +            "drift_rmse": drift_rmse, "champion_rmse": result["champion_rmse"]}
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/routers/data.py 2_전력수요_AIOps/serving_app/routers/data.py
 --- 1_빈칸정답_HAIC/serving_app/routers/data.py	2026-09-29 13:52:58
-+++ 2_전력수요_AIOps/serving_app/routers/data.py	2026-10-01 16:58:50
++++ 2_전력수요_AIOps/serving_app/routers/data.py	2026-10-02 09:40:42
 @@ -1,6 +1,9 @@
  """
 -HAIC 가상 데이터 업로드 - data/generate_haic_data.py로 자동 생성하던 방식을 대체합니다.
@@ -1559,7 +1631,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  /data 폴더는 이 라우터로 업로드된 CSV만 쌓이는 곳입니다(data/uploads/). 여러 번
  업로드하면 계속 쌓이고, 학습(train_and_register.py, fine_tune 등)은 항상 가장
  최근 파일 하나를 사용합니다(data/storage.py의 latest_upload()).
-@@ -14,13 +17,14 @@
+@@ -14,13 +17,15 @@
  
  from fastapi import APIRouter, File, HTTPException, UploadFile
  
@@ -1572,10 +1644,11 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
 -REQUIRED_COLUMNS = {"Date", "Close", "Volume"}
 +REQUIRED_COLUMNS = {"Date", "Demand", "Temp", "Holiday"}  # 🔧 [전력수요 변경]
++OPTIONAL_COLUMNS = {"Myeongjeol", "Bridge"}  # ➕ [명절·징검다리 추가] 없으면 0 으로 처리 (data/features.py load_rows)
  MIN_ROWS = SEQ_LEN + WINDOW_SIZE  # 시퀀스 구성 + 드리프트 판정 윈도우에 필요한 최소 행 수
  
  
-@@ -28,7 +32,7 @@
+@@ -28,7 +33,7 @@
  async def upload(file: UploadFile = File(...)):
      raw = await file.read()
      try:
@@ -1584,7 +1657,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
      except UnicodeDecodeError:
          raise HTTPException(400, "UTF-8로 인코딩된 CSV 파일만 업로드할 수 있습니다.")
  
-@@ -40,7 +44,7 @@
+@@ -40,7 +45,7 @@
          raise HTTPException(400, f"최소 {MIN_ROWS}행 이상의 데이터가 필요합니다.")
  
      os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -1593,7 +1666,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
      with open(dest, "w", encoding="utf-8", newline="") as f:
          f.write(text)
  
-@@ -55,13 +59,28 @@
+@@ -55,13 +60,28 @@
          return {"exists": False}
  
      rows = load_rows(path)
@@ -1811,8 +1884,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    }
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/routers/predict.py 2_전력수요_AIOps/serving_app/routers/predict.py
 --- 1_빈칸정답_HAIC/serving_app/routers/predict.py	2026-10-01 16:49:42
-+++ 2_전력수요_AIOps/serving_app/routers/predict.py	2026-10-01 16:56:01
-@@ -1,99 +1,98 @@
++++ 2_전력수요_AIOps/serving_app/routers/predict.py	2026-10-02 09:40:36
+@@ -1,99 +1,99 @@
  """
  [Day1 → Day3] 예측 API  —  serving_app/routers/predict.py
 -【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
@@ -1860,7 +1933,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
 +# 🔧 [전력수요 변경] (신규) API 요청(pydantic, 소문자 키) → features.py 가 쓰는 행 dict(대문자 키)
 +def _to_row(r) -> dict:
-+    row = {"Date": r.date.isoformat(), "Temp": r.temp, "Holiday": r.holiday}
++    row = {"Date": r.date.isoformat(), "Temp": r.temp, "Holiday": r.holiday,
++           "Myeongjeol": r.myeongjeol, "Bridge": r.bridge}  # ➕ [명절·징검다리 추가]
 +    if hasattr(r, "demand"):
 +        row["Demand"] = r.demand
 +    return row
@@ -1949,7 +2023,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -        actual = prices[i + SEQ_LEN]
 +        window = rows[i : i + SEQ_LEN]
 +        target = rows[i + SEQ_LEN]  # 🔧 [전력수요 변경] 다음날의 기온·휴일은 예측 입력으로, 수요는 정답으로
-+        pred = model.predict_one(window, {k: target[k] for k in ("Date", "Temp", "Holiday")})
++        pred = model.predict_one(window, {k: target[k] for k in ("Date", "Temp", "Holiday", "Myeongjeol", "Bridge")})  # ➕ [명절·징검다리 추가]
 +        actual = target["Demand"]
          predictions.append(pred)
 +        actuals.append(actual)
@@ -1967,8 +2041,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    return BatchTestResponse(predictions=predictions, actuals=actuals, drift_check=drift_check)
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/schemas.py 2_전력수요_AIOps/serving_app/schemas.py
 --- 1_빈칸정답_HAIC/serving_app/schemas.py	2026-09-16 20:20:55
-+++ 2_전력수요_AIOps/serving_app/schemas.py	2026-10-01 16:53:55
-@@ -1,43 +1,52 @@
++++ 2_전력수요_AIOps/serving_app/schemas.py	2026-10-02 09:40:36
+@@ -1,43 +1,55 @@
  """
  Day1: FastAPI 요청/응답 Pydantic 스키마.
  
@@ -1996,6 +2070,9 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +    date: Date = Field(..., description="날짜 (YYYY-MM-DD)")
 +    temp: float = Field(..., ge=-40, le=50, description="전국 인구가중 일평균기온(℃). 예측 대상일은 기상 예보값")
 +    holiday: int = Field(0, ge=0, le=1, description="공휴일·명절·대체공휴일이면 1 (주말은 날짜로 자동 판단)")
++    # ➕ [명절·징검다리 추가] 기본값 0 이라 예전 요청 형식도 그대로 동작
++    myeongjeol: int = Field(0, ge=0, le=1, description="설·추석 연휴(대체공휴일 포함)면 1")
++    bridge: int = Field(0, ge=0, le=1, description="징검다리: 평일인데 앞뒤 날이 모두 휴일이면 1")
  
  
 +class DayRecord(TargetDay):
@@ -2037,7 +2114,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
      drift_check: dict
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/static/basic.html 2_전력수요_AIOps/serving_app/static/basic.html
 --- 1_빈칸정답_HAIC/serving_app/static/basic.html	1970-01-01 09:00:00
-+++ 2_전력수요_AIOps/serving_app/static/basic.html	2026-10-02 09:19:12
++++ 2_전력수요_AIOps/serving_app/static/basic.html	2026-10-02 09:42:37
 @@ -0,0 +1,411 @@
 +<!DOCTYPE html>
 +<!-- ✏️ [데모 대시보드 수정] 이 파일은 이전 static/index.html(1장짜리 실습 대시보드)을 내용 변경 없이 이름만 바꿔 보존한 것입니다.
@@ -2197,13 +2274,13 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +      <!-- 🔧 [전력수요 변경] 랜덤워크 대신 서버(/data/sample-batch)가 2025년 실제 42일을 잘라 주고, 드리프트 시나리오를 고름 -->
 +      <p>
 +        업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 전송합니다.
-+        드리프트 배치는 같은 42일에 아래 시나리오의 변화를 덧씌운 것입니다. 최근 28일 RMSE가 75 GWh를 넘으면
++        드리프트 배치는 같은 42일에 아래 시나리오의 변화를 덧씌운 것입니다. 최근 28일 RMSE가 60 GWh를 넘으면
 +        감지 → 재학습 → (게이트 통과 시) 재배포까지 진행됩니다.
 +      </p>
 +    </div>
 +    <div class="btn-row">
 +      <select id="scenario-select" class="btn secondary">
-+        <option value="ramp">수요 점진 증가 (0 → +25%)</option>
++        <option value="ramp">수요 점진 증가 (0 → +20%)</option><!-- ➕ [명절·징검다리 추가] -->
 +        <option value="level">수요 일괄 증가 (+15%)</option>
 +        <option value="temp_bias">기온 센서 오류 (+8℃)</option>
 +      </select>
@@ -2253,7 +2330,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +// 서버(data/features.py, monitoring/drift_detector.py)와 동일한 값 (상수만 복제)
 +const SEQ_LEN = 14;          // 🔧 [전력수요 변경] 20 → 14
 +const WINDOW_SIZE = 28;      // 🔧 [전력수요 변경] 21 → 28
-+const RMSE_THRESHOLD = 75.0; // 🔧 [전력수요 변경] $4 → 75 GWh
++const RMSE_THRESHOLD = 60.0; // 🔧 [전력수요 변경] $4 → GWh 기준  ➕ [명절·징검다리 추가] 75 → 60
 +
 +let lastPipelineRun = null; // { driftCheck, clientRmse, ts }
 +
@@ -2452,7 +2529,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 +</html>
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/static/index.html 2_전력수요_AIOps/serving_app/static/index.html
 --- 1_빈칸정답_HAIC/serving_app/static/index.html	2026-09-29 15:20:34
-+++ 2_전력수요_AIOps/serving_app/static/index.html	2026-10-02 09:22:23
++++ 2_전력수요_AIOps/serving_app/static/index.html	2026-10-02 09:42:37
 @@ -1,406 +1,690 @@
  <!DOCTYPE html>
 +<!--
@@ -2852,10 +2929,10 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -        <span class="pill neutral" id="pipeline-run-badge">아직 실행 안 함</span>
 -      </div>
 +    <h2>드리프트 시뮬레이션</h2>
-+    <p class="sub">업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 보냅니다 (14일 창문 × 28번 예측). 드리프트 배치는 같은 42일에 아래 시나리오를 덧씌운 것이고, 최근 28일 RMSE가 <b id="thr-text">75</b> GWh를 넘으면 감지 → fine-tuning → (게이트 통과 시) 재배포까지 진행됩니다.</p>
++    <p class="sub">업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 보냅니다 (14일 창문 × 28번 예측). 드리프트 배치는 같은 42일에 아래 시나리오를 덧씌운 것이고, 최근 28일 RMSE가 <b id="thr-text">60</b> GWh를 넘으면 감지 → fine-tuning → (게이트 통과 시) 재배포까지 진행됩니다.</p>
 +    <div class="row">
 +      <select id="scenario" class="btn ghost">
-+        <option value="ramp">수요 점진 증가 (0 → +25%)</option>
++        <option value="ramp">수요 점진 증가 (0 → +20%)</option><!-- ➕ [명절·징검다리 추가] +25% → +20% -->
 +        <option value="level">수요 일괄 증가 (+15%)</option>
 +        <option value="temp_bias">기온 센서 오류 (+8℃)</option>
 +      </select>
@@ -2894,7 +2971,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -          <code>[OK] new_rmse=... promoted</code> 순서로 남는지 아래에서 직접 열어 확인하세요.
 -        </p>
 +    <h2>전력수요 데이터 업로드</h2>
-+    <p class="sub"><code>data/uploads/</code>에 쌓이고, 학습·시뮬레이션은 가장 최근 파일을 씁니다. 예시: <code>data/sample_power_daily.csv</code> (컬럼 Date, Demand(GWh), Temp(℃), Holiday(0/1) · 최소 42행).</p>
++    <p class="sub"><code>data/uploads/</code>에 쌓이고, 학습·시뮬레이션은 가장 최근 파일을 씁니다. 예시: <code>data/sample_power_daily.csv</code> (컬럼 Date, Demand(GWh), Temp(℃), Holiday(0/1), 선택: Myeongjeol·Bridge(0/1) · 최소 42행).<!-- ➕ [명절·징검다리 추가] --></p>
 +    <div class="row"><input type="file" id="upload-input" accept=".csv" /><button class="btn primary" onclick="uploadFile()">업로드</button><span id="upload-status"></span></div>
 +  </div>
 +  <div class="card">
@@ -2985,7 +3062,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  ];
 +let currentWindow = "5m";
 +const WINDOW_LABEL = { "5m": "최근 5분", "1h": "최근 1시간", "6h": "최근 6시간", "24h": "최근 24시간" };
-+let THRESHOLD = 75;
++let THRESHOLD = 60;  // ➕ [명절·징검다리 추가] 75 → 60 (서버 응답으로 덮어씀)
  
 -/* ===================== 유틸 ===================== */
 -function randn() {
@@ -3463,8 +3540,8 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  </body>
 diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/train_and_register.py 2_전력수요_AIOps/serving_app/train_and_register.py
 --- 1_빈칸정답_HAIC/serving_app/train_and_register.py	2026-09-29 13:52:58
-+++ 2_전력수요_AIOps/serving_app/train_and_register.py	2026-10-01 17:13:25
-@@ -1,15 +1,23 @@
++++ 2_전력수요_AIOps/serving_app/train_and_register.py	2026-10-02 09:45:13
+@@ -1,15 +1,24 @@
  """
 -Day2: MLflow로 HAIC LSTM 모델을 학습 -> 기록(Tracking) -> 게이트 검증 -> 등록(Registry) -> Production 승격.
 +Day2: MLflow로 전력수요 LSTM 모델을 학습 -> 기록(Tracking) -> 게이트 검증 -> 등록(Registry) -> Production 승격.
@@ -3477,14 +3554,15 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -       10 epoch만 fine-tuning (처음부터 다시 학습하지 않음 - 21거래일로는 스크래치 학습이 불안정)
 +실습 시나리오:
 +    1) 2021~2024 데이터로 base 모델 학습(100 epoch) -> 2025 데이터로 RMSE 확인
-+    2) 게이트(75 GWh) 통과 시 Production으로 승격
++    2) 게이트(60 GWh) 통과 시 Production으로 승격
 +    3) (Day3) 드리프트 감지 시 Production 가중치에서 warm-start -> 최근 4주 관측 데이터로
 +       10 epoch만 fine-tuning (처음부터 다시 학습하지 않음 - 28일로는 스크래치 학습이 불안정)
  
 +🔧 [전력수요 변경] 요약
 +   - HAICScaler → PowerScaler, HAIC_Predictor → Power_Demand_Predictor
-+   - RMSE_GATE $4.00 → 75 GWh  (근거: 2025년이 아닌 2024년 "검증" 데이터로 정함 — scripts/calibrate_on_validation.py.
-+     2021~2023 학습 모델의 2024년 28일 구간별 RMSE 최댓값 71.1 GWh → 5 단위 올림. 2025년은 최종 평가에만 사용)
++   - RMSE_GATE $4.00 → 60 GWh  (근거: 2025년이 아닌 2024년 "검증" 데이터로 정함 — scripts/calibrate_on_validation.py.
++     2021~2023 학습 모델의 2024년 28일 구간별 RMSE 최댓값 55.3 GWh → 5 단위 올림. 2025년은 최종 평가에만 사용)
++     ➕ [명절·징검다리 추가] 명절·징검다리 피처로 검증 오차가 줄어 75 → 60 GWh (이전: 최댓값 71.1 → 75)
 +   - 분할: 날짜 기준 (2021~2024 학습 / 2025 평가), MAPE 지표 추가 기록
 +   - fine_tune(): "챔피언-챌린저" 비교 추가 — 같은 평가 구간에서 기존 Production 보다 나을 때만 승격
 +     (원본은 게이트만 통과하면 기존보다 나빠도 승격될 수 있었음)
@@ -3495,12 +3573,13 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
      python scripts/train_baseline_v1.py     # 최초 1회 (scaler.pkl 생성)
      python serving_app/train_and_register.py
  """
-@@ -24,20 +32,18 @@
+@@ -24,20 +33,19 @@
  from mlflow.tracking import MlflowClient
  from tensorflow import keras
  
 -from data.features import load_rows, build_sequences, train_test_split, HAICScaler
 +from data.features import load_rows, build_sequences, train_test_split, PowerScaler, SEQ_LEN  # 🔧 [전력수요 변경]
++from data.features import require_holiday_detail  # ➕ [명절·징검다리 추가]
  from data.storage import latest_upload
  from serving_app.lstm_model import build_model
  
@@ -3513,7 +3592,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  
 -RMSE_GATE = 4.00
 -MODEL_NAME = "HAIC_Predictor"
-+RMSE_GATE = 75.0  # 🔧 [전력수요 변경] $4.00 → 75 GWh (2024 검증으로 정함)
++RMSE_GATE = 60.0  # 🔧 [전력수요 변경] $4.00 → GWh 기준 (2024 검증으로 정함)  ➕ [명절·징검다리 추가] 75 → 60
 +MODEL_NAME = "Power_Demand_Predictor"  # 🔧 [전력수요 변경] HAIC_Predictor → Power_Demand_Predictor
  SCALER_PATH = "serving_app/models/scaler.pkl"
 -BASE_EPOCHS = 100  # 3층 LSTM + 3년치 데이터 기준, RMSE가 안정적으로 게이트 아래로 수렴하는 지점
@@ -3521,7 +3600,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
  FINE_TUNE_EPOCHS = 10
  FINE_TUNE_LR = 1e-4  # base 학습(1e-3)보다 낮은 학습률로 살짝만 갱신
  
-@@ -46,49 +52,64 @@
+@@ -46,49 +54,66 @@
      return float(np.sqrt(np.mean((np.array(y_true) - np.array(y_pred)) ** 2)))
  
  
@@ -3579,8 +3658,11 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
 -    """
 +    """Day2: 처음부터(scratch) 학습. 데이터가 충분한 base 학습에서만 사용합니다."""
      if rows is None:
-         rows = load_rows(csv_path or latest_upload())
+-        rows = load_rows(csv_path or latest_upload())
 -    scaler = HAICScaler.load(SCALER_PATH)
++        csv_path = csv_path or latest_upload()
++        require_holiday_detail(csv_path)  # ➕ [명절·징검다리 추가] 열이 없으면 학습 중단
++        rows = load_rows(csv_path)
 +    scaler = PowerScaler.load(SCALER_PATH)
      X_train, y_train_scaled, X_test, y_test = _prepare(rows, scaler)
  
@@ -3602,7 +3684,7 @@ diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x RE
          mlflow.tensorflow.log_model(model, name="model", input_example=X_train[:1])
  
          return _register_if_gate_passed(model, mlflow.active_run().info.run_id, score)
-@@ -96,28 +117,36 @@
+@@ -96,28 +121,36 @@
  
  def fine_tune(rows: list[dict]) -> dict:
      """

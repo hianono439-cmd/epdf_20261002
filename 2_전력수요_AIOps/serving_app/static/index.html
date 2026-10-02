@@ -264,10 +264,10 @@
 <section class="view" id="view-simulation">
   <div class="card">
     <h2>드리프트 시뮬레이션</h2>
-    <p class="sub">업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 보냅니다 (14일 창문 × 28번 예측). 드리프트 배치는 같은 42일에 아래 시나리오를 덧씌운 것이고, 최근 28일 RMSE가 <b id="thr-text">75</b> GWh를 넘으면 감지 → fine-tuning → (게이트 통과 시) 재배포까지 진행됩니다.</p>
+    <p class="sub">업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 보냅니다 (14일 창문 × 28번 예측). 드리프트 배치는 같은 42일에 아래 시나리오를 덧씌운 것이고, 최근 28일 RMSE가 <b id="thr-text">60</b> GWh를 넘으면 감지 → fine-tuning → (게이트 통과 시) 재배포까지 진행됩니다.</p>
     <div class="row">
       <select id="scenario" class="btn ghost">
-        <option value="ramp">수요 점진 증가 (0 → +25%)</option>
+        <option value="ramp">수요 점진 증가 (0 → +20%)</option><!-- ➕ [명절·징검다리 추가] +25% → +20% -->
         <option value="level">수요 일괄 증가 (+15%)</option>
         <option value="temp_bias">기온 센서 오류 (+8℃)</option>
       </select>
@@ -296,7 +296,7 @@
 <section class="view" id="view-datasets">
   <div class="card">
     <h2>전력수요 데이터 업로드</h2>
-    <p class="sub"><code>data/uploads/</code>에 쌓이고, 학습·시뮬레이션은 가장 최근 파일을 씁니다. 예시: <code>data/sample_power_daily.csv</code> (컬럼 Date, Demand(GWh), Temp(℃), Holiday(0/1) · 최소 42행).</p>
+    <p class="sub"><code>data/uploads/</code>에 쌓이고, 학습·시뮬레이션은 가장 최근 파일을 씁니다. 예시: <code>data/sample_power_daily.csv</code> (컬럼 Date, Demand(GWh), Temp(℃), Holiday(0/1), 선택: Myeongjeol·Bridge(0/1) · 최소 42행).<!-- ➕ [명절·징검다리 추가] --></p>
     <div class="row"><input type="file" id="upload-input" accept=".csv" /><button class="btn primary" onclick="uploadFile()">업로드</button><span id="upload-status"></span></div>
   </div>
   <div class="card">
@@ -365,7 +365,7 @@ const STAGES = [
 ];
 let currentWindow = "5m";
 const WINDOW_LABEL = { "5m": "최근 5분", "1h": "최근 1시간", "6h": "최근 6시간", "24h": "최근 24시간" };
-let THRESHOLD = 75;
+let THRESHOLD = 60;  // ➕ [명절·징검다리 추가] 75 → 60 (서버 응답으로 덮어씀)
 
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 1) => (v == null || isNaN(v) ? "-" : Number(v).toLocaleString("ko-KR", { minimumFractionDigits: d, maximumFractionDigits: d }));

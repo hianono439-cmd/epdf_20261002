@@ -19,7 +19,7 @@ import os
 
 UPLOAD_DIR = "data/uploads"
 OBSERVED_PATH = "data/observed/observed.csv"  # 🔧 [전력수요 변경] 신규
-OBSERVED_COLUMNS = ["Date", "Demand", "Temp", "Holiday"]  # 🔧 [전력수요 변경] 신규
+OBSERVED_COLUMNS = ["Date", "Demand", "Temp", "Holiday", "Myeongjeol", "Bridge"]  # 🔧 [전력수요 변경] 신규 (➕ [명절·징검다리 추가] 두 열)
 
 
 def latest_upload(upload_dir: str = UPLOAD_DIR) -> str:
@@ -42,4 +42,4 @@ def append_observed(records: list[dict], path: str = OBSERVED_PATH) -> None:
         if is_new:
             writer.writeheader()
         for r in records:
-            writer.writerow({k: r[k] for k in OBSERVED_COLUMNS})
+            writer.writerow({k: r.get(k, 0) for k in OBSERVED_COLUMNS})  # ➕ [명절·징검다리 추가] 없는 열은 0

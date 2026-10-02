@@ -25,6 +25,7 @@ from serving_app.monitoring.drift_detector import WINDOW_SIZE
 router = APIRouter(prefix="/data")
 
 REQUIRED_COLUMNS = {"Date", "Demand", "Temp", "Holiday"}  # 🔧 [전력수요 변경]
+OPTIONAL_COLUMNS = {"Myeongjeol", "Bridge"}  # ➕ [명절·징검다리 추가] 없으면 0 으로 처리 (data/features.py load_rows)
 MIN_ROWS = SEQ_LEN + WINDOW_SIZE  # 시퀀스 구성 + 드리프트 판정 윈도우에 필요한 최소 행 수
 
 

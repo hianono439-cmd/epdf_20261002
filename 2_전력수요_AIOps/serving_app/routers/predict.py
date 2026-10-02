@@ -34,7 +34,8 @@ recent_predictions: list[dict] = []
 
 # 🔧 [전력수요 변경] (신규) API 요청(pydantic, 소문자 키) → features.py 가 쓰는 행 dict(대문자 키)
 def _to_row(r) -> dict:
-    row = {"Date": r.date.isoformat(), "Temp": r.temp, "Holiday": r.holiday}
+    row = {"Date": r.date.isoformat(), "Temp": r.temp, "Holiday": r.holiday,
+           "Myeongjeol": r.myeongjeol, "Bridge": r.bridge}  # ➕ [명절·징검다리 추가]
     if hasattr(r, "demand"):
         row["Demand"] = r.demand
     return row
@@ -84,7 +85,7 @@ def batch_test(req: BatchTestRequest):
         # ✅ [빈칸 6 정답] 창문 = i ~ i+SEQ_LEN-1 (끝 인덱스는 포함 안 됨), 실제값 = 창문 바로 다음 날
         window = rows[i : i + SEQ_LEN]
         target = rows[i + SEQ_LEN]  # 🔧 [전력수요 변경] 다음날의 기온·휴일은 예측 입력으로, 수요는 정답으로
-        pred = model.predict_one(window, {k: target[k] for k in ("Date", "Temp", "Holiday")})
+        pred = model.predict_one(window, {k: target[k] for k in ("Date", "Temp", "Holiday", "Myeongjeol", "Bridge")})  # ➕ [명절·징검다리 추가]
         actual = target["Demand"]
         predictions.append(pred)
         actuals.append(actual)

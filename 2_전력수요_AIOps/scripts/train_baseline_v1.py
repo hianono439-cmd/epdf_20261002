@@ -20,7 +20,7 @@
    - 학습 2021~2024 / 평가 2025 (날짜 기준 분할, 원본은 앞 80% / 뒤 20%)
    - 스케일러를 "학습 기간(2025 이전)" 데이터로만 fit
      (원본은 전체 데이터로 fit → 평가 구간의 최소·최대가 학습에 새어 들어감)
-   - RMSE 단위 달러 → GWh, 게이트 $4.00 → 75 GWh, MAPE(%)와 기준선(어제/지난주 같은 요일)도 함께 출력
+   - RMSE 단위 달러 → GWh, 게이트 $4.00 → 60 GWh, MAPE(%)와 기준선(어제/지난주 같은 요일)도 함께 출력
 """
 import os
 import sys
@@ -35,13 +35,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 #   latest_upload    : data/uploads/ 에서 가장 최근 올린 CSV 경로
 #   build_model      : LSTM 모델 뼈대 만들기
 from data.features import load_rows, build_sequences, train_test_split, PowerScaler, TEST_START  # 🔧 [전력수요 변경]
+from data.features import require_holiday_detail  # ➕ [명절·징검다리 추가]
 from data.storage import latest_upload
 from serving_app.lstm_model import build_model
 
 MODEL_PATH = "serving_app/models/power_v1.keras"  # 🔧 [전력수요 변경] haic_v1.keras → power_v1.keras
 SCALER_PATH = "serving_app/models/scaler.pkl"
 BASE_EPOCHS = 100  # 전체 문제를 100번 반복해서 학습
-RMSE_GATE = 75.0  # 🔧 [전력수요 변경] $4.00 → 75 GWh (2024 검증으로 정한 값, train_and_register.py 와 같음)
+RMSE_GATE = 60.0  # 🔧 [전력수요 변경] $4.00 → GWh 기준 (2024 검증으로 정함, train_and_register.py 와 같음)  ➕ [명절·징검다리 추가] 75 → 60
 
 
 def rmse(y_true, y_pred) -> float:
@@ -61,7 +62,9 @@ def main():
     keras.utils.set_random_seed(42)  # 🔧 [전력수요 변경] 재현성을 위해 시드 고정 (train_and_register.py 와 동일)
 
     # STEP 1. 데이터 읽기 — 가장 최근 업로드한 CSV를 행 목록으로 (2021~2025, 1,826행)
-    rows = load_rows(latest_upload())
+    csv_path = latest_upload()
+    require_holiday_detail(csv_path)  # ➕ [명절·징검다리 추가] 열이 없으면 학습 중단
+    rows = load_rows(csv_path)
 
     # STEP 2. 스케일러 만들고 저장하기
     #   수요(1,000~2,000 GWh)와 기온(-13~30℃)은 크기 차이가 커서 둘 다 0~1로 맞춰 줍니다.

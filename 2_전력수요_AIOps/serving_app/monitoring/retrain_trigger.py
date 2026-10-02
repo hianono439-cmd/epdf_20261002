@@ -6,8 +6,8 @@
    시험을 통과하면 새 모델을 Production 으로 올립니다. 이 과정을 전부 로그로 남깁니다.
 
 ■ 전체 흐름
-   드리프트 감지(RMSE > 75 GWh) → 경고 로그 → 최근 관측 데이터 가져오기 → fine-tuning
-     → 시험 통과(RMSE ≤ 75 GWh 이고 기존 모델보다 좋음)? ─ 예   → 새 버전 Production 승격 + 성공 로그 + 모델 캐시 교체
+   드리프트 감지(RMSE > 60 GWh) → 경고 로그 → 최근 관측 데이터 가져오기 → fine-tuning
+     → 시험 통과(RMSE ≤ 60 GWh 이고 기존 모델보다 좋음)? ─ 예   → 새 버전 Production 승격 + 성공 로그 + 모델 캐시 교체
                                                           └ 아니오 → 기존 Production 그대로 유지
 
 ■ 확인 방법 — logs/aiops.log (또는 대시보드 "재학습 로그")

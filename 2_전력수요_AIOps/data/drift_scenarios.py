@@ -11,8 +11,9 @@
        temp_bias 기온 관측값이 +TEMP_BIAS℃ 틀어짐 (관측소 센서 이상 같은 "입력 데이터" 드리프트)
 
 변화 크기는 2025년이 아니라 2024년 검증 데이터로 정했습니다 (scripts/calibrate_on_validation.py,
-결과: docs/검증기간_보정결과.json). ramp 는 검증 구간 49개 전부에서 기준값(75 GWh)을 넘는 가장 작은 크기(+25%)입니다.
-(+20%는 92%만 감지. level 은 84%, temp_bias 는 33% 감지 — 기본 시나리오가 아닌 참고용)
+결과: docs/검증기간_보정결과.json). ramp 는 검증 구간 49개 전부에서 기준값(60 GWh)을 넘는 가장 작은 크기(+20%)입니다.
+(level 은 92%, temp_bias 는 61% 감지 — 기본 시나리오가 아닌 참고용)
+➕ [명절·징검다리 추가] 피처 9개·기준값 60 기준으로 다시 계산 (이전: 기준값 75 에서 +25%)
 """
 import random
 
@@ -21,7 +22,7 @@ from data.storage import latest_upload
 
 BATCH_N = SEQ_LEN + 28  # 14 + 28(WINDOW_SIZE) = 42일 → 배치 하나로 판정 윈도우 28건이 채워짐
 SCENARIOS = ("ramp", "level", "temp_bias")
-RAMP_MAX = 0.25   # 검증(2024)에서 정함 — calibrate_on_validation.py 참고
+RAMP_MAX = 0.20   # 검증(2024)에서 정함 — calibrate_on_validation.py 참고  (➕ [명절·징검다리 추가] 0.25 → 0.20)
 LEVEL_UP = 0.15
 TEMP_BIAS = 8.0
 
@@ -54,6 +55,7 @@ def make_batch(kind: str = "normal", scenario: str = "ramp", seed: int | None = 
     if kind == "drift":
         apply_scenario(rows, scenario)
     return [
-        {"date": r["Date"], "demand": round(r["Demand"], 1), "temp": round(r["Temp"], 2), "holiday": r["Holiday"]}
+        {"date": r["Date"], "demand": round(r["Demand"], 1), "temp": round(r["Temp"], 2), "holiday": r["Holiday"],
+         "myeongjeol": r["Myeongjeol"], "bridge": r["Bridge"]}  # ➕ [명절·징검다리 추가]
         for r in rows
     ]

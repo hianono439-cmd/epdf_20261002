@@ -3,6 +3,7 @@
 
 2025년은 마지막 평가에만 써야 하므로, 아래 결정은 모두 2024년 검증 데이터로 합니다.
     학습 2021~2023  →  검증 2024  (스케일러도 2021~2023으로만 fit)
+    0) 피처 비교        : 7개(기존) vs 9개(➕ 명절·징검다리 추가) — 검증 RMSE 가 0.5 GWh 이상 좋아질 때만 채택
     1) 모델 크기 비교   : LSTM (32,32,16) vs (64,32,16)
     2) 기준값(RMSE)     : 2024년 28일 구간별 RMSE 최댓값을 5 GWh 단위로 올림
                           → drift_detector.RMSE_THRESHOLD, train_and_register.RMSE_GATE 에 사용
@@ -27,7 +28,7 @@ from tensorflow import keras
 
 from data import features
 from data.drift_scenarios import apply_scenario
-from data.features import SEQ_LEN, N_FEATURES, PowerScaler, build_sequences, load_rows
+from data.features import SEQ_LEN, PowerScaler, build_sequences, load_rows  # ➕ N_FEATURES 대신 X.shape[2] 사용
 
 TRAIN_END = "2024-01-01"  # 이 날짜 전 = 학습
 VAL_END = "2025-01-01"  # 이 날짜 전 = 검증 (2025는 읽기만 하고 쓰지 않음)
@@ -36,10 +37,10 @@ EPOCHS = 100
 OUT_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "검증기간_보정결과.json")
 
 
-def build(units):
+def build(units, n_features):  # ➕ [명절·징검다리 추가] 입력 피처 수를 인자로 (7 / 9 비교용)
     model = keras.Sequential(
         [
-            keras.layers.Input(shape=(SEQ_LEN, N_FEATURES)),
+            keras.layers.Input(shape=(SEQ_LEN, n_features)),
             keras.layers.LSTM(units[0], return_sequences=True),
             keras.layers.LSTM(units[1], return_sequences=True),
             keras.layers.LSTM(units[2]),
@@ -92,11 +93,42 @@ def main():
           f"| 현재 설정 HDD {features.HDD_BASE} / CDD {features.CDD_BASE}")
 
     scaler = PowerScaler().fit(train_rows)
-    X, y, dates = build_sequences(rows, scaler)
-    split = next(k for k, d in enumerate(dates) if d >= TRAIN_END)
-    X = np.array(X, dtype="float32")
-    X_tr, X_val = X[:split], X[split:]
-    y_tr, y_val = np.array(y[:split]), np.array(y[split:])
+
+    def prepare(use_detail: bool):
+        features.USE_HOLIDAY_DETAIL = use_detail  # ➕ 피처 7개 / 9개 전환
+        X, y, dates = build_sequences(rows, scaler)
+        split = next(k for k, d in enumerate(dates) if d >= TRAIN_END)
+        X = np.array(X, dtype="float32")
+        return X[:split], X[split:], np.array(y[:split]), np.array(y[split:]), dates, split
+
+    # ➕ [명절·징검다리 추가] 0) 피처 비교 — 같은 모델 (32,32,16), 같은 시드
+    by_date = {r["Date"]: r for r in rows}
+    feat_results = {}
+    for use_detail in (False, True):
+        X_tr, X_val, y_tr, y_val, dates, split = prepare(use_detail)
+        y_tr_s = np.array([scaler.scale_demand(v) for v in y_tr], dtype="float32")
+        keras.utils.set_random_seed(42)
+        m0 = build((32, 32, 16), X_tr.shape[2])
+        m0.fit(X_tr, y_tr_s, epochs=EPOCHS, verbose=0)
+        p0 = np.array([scaler.inverse_demand(v) for v in m0.predict(X_val, verbose=0).flatten()])
+        special = [k for k, d in enumerate(dates[split:]) if by_date[d]["Myeongjeol"] or by_date[d]["Bridge"]]
+        key = f"{X_tr.shape[2]}개"
+        feat_results[key] = {
+            "rmse": rmse(y_val, p0), "mape": mape(y_val, p0),
+            "special_days_mae": float(np.mean(np.abs(y_val[special] - p0[special]))) if special else None,
+            "special_days": [dates[split + k] for k in special],
+            "special_days_error": [round(float(y_val[k] - p0[k]), 1) for k in special],
+        }
+        r_ = feat_results[key]
+        print(f"[0] 피처 {key}: 검증 RMSE {r_['rmse']:.1f} GWh, MAPE {r_['mape']:.2f}%, "
+              f"명절·징검다리 {len(special)}일 평균 절대오차 {r_['special_days_mae']:.1f} GWh")
+    use_detail = feat_results["9개"]["rmse"] < feat_results["7개"]["rmse"] - 0.5
+    print(f"    → 채택: {'9개 (명절·징검다리 포함)' if use_detail else '7개 (기존 유지)'}")
+    for d_, e7, e9 in zip(feat_results["9개"]["special_days"], feat_results["7개"]["special_days_error"],
+                          feat_results["9개"]["special_days_error"]):
+        print(f"      {d_}  오차(실제-예측)  7개 {e7:+7.1f}  →  9개 {e9:+7.1f}")
+
+    X_tr, X_val, y_tr, y_val, dates, split = prepare(use_detail)
     y_tr_s = np.array([scaler.scale_demand(v) for v in y_tr], dtype="float32")
     print(f"학습 {len(X_tr)}개 ({dates[0]}~{dates[split - 1]}) / 검증 {len(X_val)}개 ({dates[split]}~{dates[-1]})")
 
@@ -104,7 +136,7 @@ def main():
     results, models = {}, {}
     for units in [(32, 32, 16), (64, 32, 16)]:
         keras.utils.set_random_seed(42)
-        m = build(units)
+        m = build(units, X_tr.shape[2])
         m.fit(X_tr, y_tr_s, epochs=EPOCHS, verbose=0)
         pred = np.array([scaler.inverse_demand(v) for v in m.predict(X_val, verbose=0).flatten()])
         results[str(units)] = {"rmse": rmse(y_val, pred), "mape": mape(y_val, pred)}
@@ -162,6 +194,7 @@ def main():
         "split": {"train": f"{dates[0]}~{dates[split - 1]}", "validation": f"{dates[split]}~{dates[-1]}",
                   "test(미사용)": "2025-01-01~2025-12-31"},
         "degree_day_bases_2021_2023": {"HDD": hb, "CDD": cb, "r2": r2},
+        "feature_comparison": feat_results, "use_holiday_detail": use_detail,  # ➕ [명절·징검다리 추가]
         "model_size": results, "chosen_units": list(chosen), "naive": naive,
         "rolling28_rmse": {"median": float(np.median(roll)), "p95": float(np.percentile(roll, 95)),
                            "max": float(roll.max()), "max_window_end": worst_end},

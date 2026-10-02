@@ -4,14 +4,15 @@ Day3: 드리프트 감지 후 Production 가중치에서 이어서 학습하는 
 
 실습 시나리오:
     1) 2021~2024 데이터로 base 모델 학습(100 epoch) -> 2025 데이터로 RMSE 확인
-    2) 게이트(75 GWh) 통과 시 Production으로 승격
+    2) 게이트(60 GWh) 통과 시 Production으로 승격
     3) (Day3) 드리프트 감지 시 Production 가중치에서 warm-start -> 최근 4주 관측 데이터로
        10 epoch만 fine-tuning (처음부터 다시 학습하지 않음 - 28일로는 스크래치 학습이 불안정)
 
 🔧 [전력수요 변경] 요약
    - HAICScaler → PowerScaler, HAIC_Predictor → Power_Demand_Predictor
-   - RMSE_GATE $4.00 → 75 GWh  (근거: 2025년이 아닌 2024년 "검증" 데이터로 정함 — scripts/calibrate_on_validation.py.
-     2021~2023 학습 모델의 2024년 28일 구간별 RMSE 최댓값 71.1 GWh → 5 단위 올림. 2025년은 최종 평가에만 사용)
+   - RMSE_GATE $4.00 → 60 GWh  (근거: 2025년이 아닌 2024년 "검증" 데이터로 정함 — scripts/calibrate_on_validation.py.
+     2021~2023 학습 모델의 2024년 28일 구간별 RMSE 최댓값 55.3 GWh → 5 단위 올림. 2025년은 최종 평가에만 사용)
+     ➕ [명절·징검다리 추가] 명절·징검다리 피처로 검증 오차가 줄어 75 → 60 GWh (이전: 최댓값 71.1 → 75)
    - 분할: 날짜 기준 (2021~2024 학습 / 2025 평가), MAPE 지표 추가 기록
    - fine_tune(): "챔피언-챌린저" 비교 추가 — 같은 평가 구간에서 기존 Production 보다 나을 때만 승격
      (원본은 게이트만 통과하면 기존보다 나빠도 승격될 수 있었음)
@@ -33,6 +34,7 @@ from mlflow.tracking import MlflowClient
 from tensorflow import keras
 
 from data.features import load_rows, build_sequences, train_test_split, PowerScaler, SEQ_LEN  # 🔧 [전력수요 변경]
+from data.features import require_holiday_detail  # ➕ [명절·징검다리 추가]
 from data.storage import latest_upload
 from serving_app.lstm_model import build_model
 
@@ -40,7 +42,7 @@ from serving_app.lstm_model import build_model
 SEED = 42
 keras.utils.set_random_seed(SEED)
 
-RMSE_GATE = 75.0  # 🔧 [전력수요 변경] $4.00 → 75 GWh (2024 검증으로 정함)
+RMSE_GATE = 60.0  # 🔧 [전력수요 변경] $4.00 → GWh 기준 (2024 검증으로 정함)  ➕ [명절·징검다리 추가] 75 → 60
 MODEL_NAME = "Power_Demand_Predictor"  # 🔧 [전력수요 변경] HAIC_Predictor → Power_Demand_Predictor
 SCALER_PATH = "serving_app/models/scaler.pkl"
 BASE_EPOCHS = 100
@@ -92,7 +94,9 @@ def _register_if_gate_passed(model, run_id: str, score: float, champion_score: f
 def train_and_register(csv_path: str | None = None, rows: list[dict] | None = None) -> dict:
     """Day2: 처음부터(scratch) 학습. 데이터가 충분한 base 학습에서만 사용합니다."""
     if rows is None:
-        rows = load_rows(csv_path or latest_upload())
+        csv_path = csv_path or latest_upload()
+        require_holiday_detail(csv_path)  # ➕ [명절·징검다리 추가] 열이 없으면 학습 중단
+        rows = load_rows(csv_path)
     scaler = PowerScaler.load(SCALER_PATH)
     X_train, y_train_scaled, X_test, y_test = _prepare(rows, scaler)
 
