@@ -1,0 +1,10 @@
+# 🆕 [데모 대시보드 추가] (신규 파일) 이미지에 로컬 실행 기록이 섞여 들어가지 않게 제외합니다.
+# 대시보드 작업으로 logs/ 에 requests.log·drift_history.log 가 쌓이고, data/observed/ 에 관측 데이터가 쌓이기 때문에
+# 이것들이 복사되면 컨테이너가 "이미 드리프트 판정·요청 기록이 있는" 상태로 시작합니다.
+**/__pycache__
+logs/
+mlruns/
+mlflow.db
+data/uploads/
+data/observed/
+.claude/

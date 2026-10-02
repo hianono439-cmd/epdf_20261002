@@ -1,0 +1,13 @@
+# 파이썬 / 가상환경
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 실행하면 생기는 파일 (각자 로컬에서 다시 만들어짐)
+mlruns/
+mlflow.db
+logs/
+2_전력수요_AIOps/data/uploads/
+2_전력수요_AIOps/data/observed/
+.claude/

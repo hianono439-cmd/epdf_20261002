@@ -1,0 +1,3646 @@
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/.dockerignore 2_전력수요_AIOps/.dockerignore
+--- 1_빈칸정답_HAIC/.dockerignore	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/.dockerignore	2026-10-02 09:25:47
+@@ -0,0 +1,10 @@
++# 🆕 [데모 대시보드 추가] (신규 파일) 이미지에 로컬 실행 기록이 섞여 들어가지 않게 제외합니다.
++# 대시보드 작업으로 logs/ 에 requests.log·drift_history.log 가 쌓이고, data/observed/ 에 관측 데이터가 쌓이기 때문에
++# 이것들이 복사되면 컨테이너가 "이미 드리프트 판정·요청 기록이 있는" 상태로 시작합니다.
++**/__pycache__
++logs/
++mlruns/
++mlflow.db
++data/uploads/
++data/observed/
++.claude/
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/data/drift_scenarios.py 2_전력수요_AIOps/data/drift_scenarios.py
+--- 1_빈칸정답_HAIC/data/drift_scenarios.py	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/data/drift_scenarios.py	2026-10-01 17:13:25
+@@ -0,0 +1,59 @@
++"""
++🔧 [전력수요 변경] (신규 파일) 정상/드리프트 배치 생성 — scripts/simulate_drift.py 와 대시보드(/data/sample-batch)가 공용.
++
++원본(HAIC)은 로그수익률 랜덤워크로 "가짜 주가"를 만들었습니다. 전력수요는 요일·휴일·기온 패턴이
++뚜렷해서 랜덤워크로 흉내 내면 정상 배치조차 실제와 달라집니다. 그래서
++  - 정상 배치  : 업로드된 CSV 중 학습에 안 쓴 2025년 실제 연속 42일을 그대로 사용 (운영 중 들어오는 새 데이터 역할)
++  - 드리프트 배치: 같은 실제 42일에 인위적인 변화를 덧씌움 (apply_scenario)
++       ramp      (기본) 수요가 42일 동안 0% → +RAMP_MAX 까지 점진적으로 증가
++                        (예: 대규모 데이터센터·전기화로 인한 구조적 수요 증가)
++       level     전 기간 수요 +LEVEL_UP 일괄 증가
++       temp_bias 기온 관측값이 +TEMP_BIAS℃ 틀어짐 (관측소 센서 이상 같은 "입력 데이터" 드리프트)
++
++변화 크기는 2025년이 아니라 2024년 검증 데이터로 정했습니다 (scripts/calibrate_on_validation.py,
++결과: docs/검증기간_보정결과.json). ramp 는 검증 구간 49개 전부에서 기준값(75 GWh)을 넘는 가장 작은 크기(+25%)입니다.
++(+20%는 92%만 감지. level 은 84%, temp_bias 는 33% 감지 — 기본 시나리오가 아닌 참고용)
++"""
++import random
++
++from data.features import SEQ_LEN, TEST_START, load_rows
++from data.storage import latest_upload
++
++BATCH_N = SEQ_LEN + 28  # 14 + 28(WINDOW_SIZE) = 42일 → 배치 하나로 판정 윈도우 28건이 채워짐
++SCENARIOS = ("ramp", "level", "temp_bias")
++RAMP_MAX = 0.25   # 검증(2024)에서 정함 — calibrate_on_validation.py 참고
++LEVEL_UP = 0.15
++TEMP_BIAS = 8.0
++
++
++def apply_scenario(rows: list[dict], scenario: str, ramp_max: float = RAMP_MAX) -> list[dict]:
++    """rows(복사본)에 드리프트를 덧씌운다. calibrate_on_validation.py 도 이 함수를 그대로 씀."""
++    for i, r in enumerate(rows):
++        if scenario == "ramp":
++            r["Demand"] *= 1 + ramp_max * i / (len(rows) - 1)
++        elif scenario == "level":
++            r["Demand"] *= 1 + LEVEL_UP
++        elif scenario == "temp_bias":
++            r["Temp"] += TEMP_BIAS
++        else:
++            raise ValueError(f"scenario 는 {SCENARIOS} 중 하나여야 합니다")
++    return rows
++
++
++def _pick_slice(rows: list[dict], n: int, seed: int | None) -> list[dict]:
++    pool = [i for i, r in enumerate(rows) if r["Date"] >= TEST_START and i + n <= len(rows)]
++    if not pool:  # 2025년 데이터가 없는 CSV 면 마지막 구간 사용
++        pool = [len(rows) - n]
++    start = random.Random(seed).choice(pool)
++    return [dict(r) for r in rows[start : start + n]]
++
++
++def make_batch(kind: str = "normal", scenario: str = "ramp", seed: int | None = None, csv_path: str | None = None) -> list[dict]:
++    """kind = normal | drift.  반환: [{"date", "demand", "temp", "holiday"}, ...] (API 요청 형식)"""
++    rows = _pick_slice(load_rows(csv_path or latest_upload()), BATCH_N, seed)
++    if kind == "drift":
++        apply_scenario(rows, scenario)
++    return [
++        {"date": r["Date"], "demand": round(r["Demand"], 1), "temp": round(r["Temp"], 2), "holiday": r["Holiday"]}
++        for r in rows
++    ]
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/data/features.py 2_전력수요_AIOps/data/features.py
+--- 1_빈칸정답_HAIC/data/features.py	2026-09-29 13:53:56
++++ 2_전력수요_AIOps/data/features.py	2026-10-01 17:13:25
+@@ -1,55 +1,88 @@
+ """
+-HAIC 데이터를 LSTM 입력용 시퀀스로 변환하는 공용 유틸리티.
++전력수요 데이터를 LSTM 입력용 시퀀스로 변환하는 공용 유틸리티.
+ 
+ Day1 baseline 학습(scripts/train_baseline_v1.py), Day2 MLflow 학습
+ (serving_app/train_and_register.py), Day3 fine-tuning 재학습
+-(monitoring/retrain_trigger.py)이 모두 이 모듈을 재사용합니다. 시퀀스 정의를
+-한 곳에서만 관리해야 "서빙 시점 입력"과 "학습 시점 입력"이 어긋나는 실무 사고를
+-방지할 수 있습니다.
++(monitoring/retrain_trigger.py), 서빙(model_loader.py)이 모두 이 모듈을 재사용합니다.
++시퀀스 정의를 한 곳에서만 관리해야 "서빙 시점 입력"과 "학습 시점 입력"이 어긋나는
++실무 사고를 방지할 수 있습니다.
+ 
+-입력 시퀀스: 최근 SEQ_LEN(20)거래일의 (close, volume)
+-타깃: 그다음 거래일의 close
++🔧 [전력수요 변경] 원본(HAIC 주가) 대비 바뀐 점
++  - 입력 CSV 컬럼: Date, Close, Volume  →  Date, Demand(GWh), Temp(℃), Holiday(0/1)
++  - 피처: (종가, 거래량) 2개  →  7개
++        [당일 수요, 다음날 기온, 다음날 난방도일, 다음날 냉방도일, 다음날 휴일 여부, 다음날 요일 sin, cos]
++        → 마지막 시점에 "예측 대상일"의 기온·휴일·요일이 들어가도록 외생변수를 하루 앞당겨 붙임
++          (주가와 달리 전력수요는 요일·휴일·기온이 결정적이고, 이 값들은 하루 전에 미리 알 수 있음)
++  - SEQ_LEN: 20거래일  →  14일 (2주 = 같은 요일이 2번 들어가는 길이)
++  - 학습/평가 분할: 앞 80% / 뒤 20% 비율  →  날짜 기준 (2021~2024 학습, 2025 평가)
++  - 스케일러: HAICScaler(close, volume)  →  PowerScaler(demand, temp)
+ """
+ import csv
++import math
+ import pickle
++from datetime import date
+ 
+-SEQ_LEN = 20  # LSTM 입력 윈도우 길이 (거래일 수) - 약 1개월치 거래일
++SEQ_LEN = 14  # 🔧 [전력수요 변경] 20거래일 → 14일 (2주)
++N_FEATURES = 7  # 🔧 [전력수요 변경] (close, volume) 2개 → 7개 (위 docstring 참고)
++TEST_START = "2025-01-01"  # 🔧 [전력수요 변경] 이 날짜 이후가 정답인 샘플은 평가(test)용
+ 
++# 🔧 [전력수요 변경] 냉·난방도일 기준온도 — 팀플 데이터/preprocess.py 가 2021~2024(최종 학습 기간)만으로
++#    회귀 R²가 가장 높은 값을 격자 탐색해서 고른 값 (2025 정보 미사용).
++#    참고: 2021~2023만으로 고르면 13.5 / 19.5 로 거의 같음 (calibrate_on_validation.py)
++HDD_BASE = 14.0
++CDD_BASE = 19.0
+ 
+-def load_rows(csv_path: str = "data/haic_prices.csv") -> list[dict]:
+-    with open(csv_path, encoding="utf-8") as f:
++
++def load_rows(csv_path: str = "data/sample_power_daily.csv") -> list[dict]:
++    # 🔧 [전력수요 변경] Close/Volume → Demand/Temp/Holiday
++    with open(csv_path, encoding="utf-8-sig") as f:
+         reader = csv.DictReader(f)
+         rows = [
+             {
+                 "Date": r["Date"],
+-                "Close": float(r["Close"]),
+-                "Volume": float(r["Volume"]),
++                "Demand": float(r["Demand"]),
++                "Temp": float(r["Temp"]),
++                "Holiday": int(float(r["Holiday"])),
+             }
+             for r in reader
+         ]
+     return rows
+ 
+ 
+-class HAICScaler:
++# 🔧 [전력수요 변경] 날짜·기온에서 파생되는 "예측 시점에 미리 아는" 변수 계산 (신규 함수)
++def exog_features(date_str: str, temp: float, holiday: int) -> list[float]:
++    """하루치 외생변수 → [기온, 난방도일, 냉방도일, 휴일여부, 요일 sin, 요일 cos] (스케일 전)"""
++    dow = date.fromisoformat(date_str).weekday()  # 0=월 ... 6=일
++    offday = 1.0 if (holiday or dow >= 5) else 0.0  # 주말 또는 공휴일
++    return [
++        temp,
++        max(0.0, HDD_BASE - temp),
++        max(0.0, temp - CDD_BASE),
++        offday,
++        math.sin(2 * math.pi * dow / 7),
++        math.cos(2 * math.pi * dow / 7),
++    ]
++
++
++class PowerScaler:
+     """
+-    close/volume을 각각 [0, 1] 범위로 정규화하는 min-max 스케일러.
++    🔧 [전력수요 변경] HAICScaler → PowerScaler
++    수요(GWh)와 기온(℃)을 [0, 1] 범위로 정규화하는 min-max 스케일러.
++    냉·난방도일은 기온 범위로 나누고, 휴일·요일(sin/cos)은 이미 작은 값이라 그대로 둡니다.
+ 
+-    LSTM은 스케일에 민감하기 때문에(트리 기반 모델과 달리) 반드시 정규화가 필요합니다.
+-    Day1에서 base 데이터로 한 번 fit한 뒤 serving_app/models/scaler.pkl로 저장해두고,
+-    Day2 MLflow 학습과 Day3 fine-tuning 모두 같은 스케일러를 재사용합니다.
+-    (fine-tuning 시 스케일러를 다시 fit하지 않는 이유: 이미 이 스케일로 학습된 모델
+-     가중치와 어긋나면 fine-tuning 자체가 무의미해지기 때문입니다.)
++    Day1에서 학습 기간(2021~2024) 데이터로만 한 번 fit한 뒤 serving_app/models/scaler.pkl로
++    저장해두고, Day2 MLflow 학습과 Day3 fine-tuning, 서빙 모두 같은 스케일러를 재사용합니다.
+     """
+ 
+     def __init__(self):
+-        self.close_min = self.close_max = None
+-        self.volume_min = self.volume_max = None
++        self.demand_min = self.demand_max = None
++        self.temp_min = self.temp_max = None
+ 
+-    def fit(self, rows: list[dict]) -> "HAICScaler":
+-        closes = [r["Close"] for r in rows]
+-        volumes = [r["Volume"] for r in rows]
+-        self.close_min, self.close_max = min(closes), max(closes)
+-        self.volume_min, self.volume_max = min(volumes), max(volumes)
++    def fit(self, rows: list[dict]) -> "PowerScaler":
++        demands = [r["Demand"] for r in rows]
++        temps = [r["Temp"] for r in rows]
++        self.demand_min, self.demand_max = min(demands), max(demands)
++        self.temp_min, self.temp_max = min(temps), max(temps)
+         return self
+ 
+     def _scale(self, value: float, lo: float, hi: float) -> float:
+@@ -60,51 +93,78 @@
+     def _unscale(self, value: float, lo: float, hi: float) -> float:
+         return value * (hi - lo) + lo
+ 
+-    def transform_point(self, close: float, volume: float) -> list[float]:
++    def transform_point(self, demand: float, next_day: dict) -> list[float]:
++        """
++        🔧 [전력수요 변경] (close, volume) → (당일 수요, 다음날 정보 dict)
++        next_day = {"Date": "2025-01-02", "Temp": -1.3, "Holiday": 0}
++        """
++        temp, hdd, cdd, offday, dsin, dcos = exog_features(next_day["Date"], next_day["Temp"], next_day["Holiday"])
++        t_range = self.temp_max - self.temp_min
+         return [
+-            self._scale(close, self.close_min, self.close_max),
+-            self._scale(volume, self.volume_min, self.volume_max),
++            self._scale(demand, self.demand_min, self.demand_max),
++            self._scale(temp, self.temp_min, self.temp_max),
++            hdd / t_range,
++            cdd / t_range,
++            offday,
++            dsin,
++            dcos,
+         ]
+ 
+-    def scale_close(self, close: float) -> float:
+-        """타깃(다음날 종가)을 학습용으로 정규화. 입력 시퀀스와 같은 스케일을 써야
+-        손실(loss)이 과도하게 커지지 않고 학습이 안정적으로 수렴한다."""
+-        return self._scale(close, self.close_min, self.close_max)
++    def scale_demand(self, demand: float) -> float:
++        """타깃(다음날 수요)을 학습용으로 정규화. (원본 scale_close)"""
++        return self._scale(demand, self.demand_min, self.demand_max)
+ 
+-    def inverse_close(self, scaled_close: float) -> float:
+-        """모델이 뱉은 정규화된 예측값을 실제 달러 단위 종가로 되돌린다."""
+-        return self._unscale(scaled_close, self.close_min, self.close_max)
++    def inverse_demand(self, scaled_demand: float) -> float:
++        """모델이 뱉은 정규화된 예측값을 실제 GWh 단위로 되돌린다. (원본 inverse_close)"""
++        return self._unscale(scaled_demand, self.demand_min, self.demand_max)
+ 
+     def save(self, path: str = "serving_app/models/scaler.pkl"):
+         with open(path, "wb") as f:
+             pickle.dump(self.__dict__, f)
+ 
+     @classmethod
+-    def load(cls, path: str = "serving_app/models/scaler.pkl") -> "HAICScaler":
++    def load(cls, path: str = "serving_app/models/scaler.pkl") -> "PowerScaler":
+         scaler = cls()
+         with open(path, "rb") as f:
+             scaler.__dict__.update(pickle.load(f))
+         return scaler
+ 
+ 
+-def build_sequences(rows: list[dict], scaler: HAICScaler, seq_len: int = SEQ_LEN):
++def window_to_input(window: list[dict], next_days: list[dict], scaler: PowerScaler) -> list[list[float]]:
+     """
+-    rows(시간순 OHLCV)에서 (SEQ_LEN, 2) 크기의 정규화된 입력 시퀀스와
+-    다음날 종가(정규화 전 실값) 타깃을 만든다.
++    🔧 [전력수요 변경] (신규) 길이 SEQ_LEN 의 과거 기록 + 각 날의 "다음날 정보"를 (SEQ_LEN, 7) 입력으로.
++    학습(build_sequences)과 서빙(model_loader.predict_one)이 이 함수 하나를 같이 씁니다.
++    """
++    return [scaler.transform_point(w["Demand"], n) for w, n in zip(window, next_days)]
+ 
+-    반환: X (n_samples, seq_len, 2), y (n_samples,) - y는 스케일 안 된 실제 종가
++
++def build_sequences(rows: list[dict], scaler: PowerScaler, seq_len: int = SEQ_LEN):
+     """
+-    scaled_points = [scaler.transform_point(r["Close"], r["Volume"]) for r in rows]
+-    closes = [r["Close"] for r in rows]
++    rows(시간순 일별 데이터)에서 (SEQ_LEN, 7) 크기의 정규화된 입력 시퀀스와
++    다음날 수요(정규화 전 실값, GWh) 타깃을 만든다.
+ 
+-    X, y = [], []
++        i 번째 샘플: 입력 = rows[i : i+SEQ_LEN] 의 수요 + rows[i+1 : i+SEQ_LEN+1] 의 기온·휴일·요일
++                     정답 = rows[i+SEQ_LEN] 의 수요
++
++    반환: X (n_samples, seq_len, 7), y (n_samples,), dates (각 정답의 날짜)
++    """
++    X, y, dates = [], [], []
+     for i in range(len(rows) - seq_len):
+-        X.append(scaled_points[i : i + seq_len])
+-        y.append(closes[i + seq_len])
+-    return X, y
++        X.append(window_to_input(rows[i : i + seq_len], rows[i + 1 : i + seq_len + 1], scaler))
++        y.append(rows[i + seq_len]["Demand"])
++        dates.append(rows[i + seq_len]["Date"])
++    return X, y, dates
+ 
+ 
+-def train_test_split(X: list, y: list, test_ratio: float = 0.2):
+-    """시간 순서를 유지한 채 앞부분을 train, 뒷부분을 test로 나눈다 (미래 데이터 누수 방지)."""
++def train_test_split(X: list, y: list, dates: list | None = None, test_ratio: float = 0.2):
++    """
++    🔧 [전력수요 변경] dates 가 주어지면 날짜 기준(TEST_START 이후 = test)으로 나눈다.
++    dates 가 없거나(재학습용 짧은 구간) TEST_START 이후 데이터가 없으면 원본처럼 시간순 비율로 나눈다.
++    어느 쪽이든 시간 순서를 유지한다 (미래 데이터 누수 방지).
++    """
++    if dates is not None:
++        split_idx = next((k for k, d in enumerate(dates) if d >= TEST_START), len(dates))
++        if 0 < split_idx < len(dates):
++            return X[:split_idx], y[:split_idx], X[split_idx:], y[split_idx:]
+     split_idx = int(len(X) * (1 - test_ratio))
+     return X[:split_idx], y[:split_idx], X[split_idx:], y[split_idx:]
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/data/storage.py 2_전력수요_AIOps/data/storage.py
+--- 1_빈칸정답_HAIC/data/storage.py	2026-09-29 13:52:58
++++ 2_전력수요_AIOps/data/storage.py	2026-10-01 16:53:55
+@@ -1,16 +1,25 @@
+ """
+-업로드된 HAIC 데이터 파일 관리.
++업로드된 전력수요 데이터 파일 관리.
+ 
+ data/generate_haic_data.py로 자동 생성하던 방식 대신, 대시보드에서 CSV 파일을
+ 직접 업로드하는 방식으로 바뀌었습니다 (serving_app/routers/data.py 참고).
+ 업로드된 파일은 이 디렉터리(data/uploads/)에 타임스탬프가 붙은 이름으로 계속
+ 쌓이고(과거 파일을 덮어쓰지 않습니다), 학습(train_and_register.py 등)은 항상
+ 가장 최근에 올라온 파일 하나를 사용합니다.
++
++🔧 [전력수요 변경] 관측 데이터 저장소(data/observed/observed.csv) 추가
++   원본은 드리프트 재학습 때도 "업로드된 학습 CSV의 마지막 41행"을 썼습니다. 그런데 드리프트는
++   서빙 중에 새로 들어온 데이터에서 일어나므로, 재학습은 그 "새로 관측된 데이터"로 해야 의미가
++   있습니다. 그래서 /predict/batch-test 로 들어온 실제값(관측치)을 이 파일에 계속 쌓고,
++   retrain_trigger.py 는 여기서 최근 구간을 잘라 fine-tuning 합니다.
+ """
++import csv
+ import glob
+ import os
+ 
+ UPLOAD_DIR = "data/uploads"
++OBSERVED_PATH = "data/observed/observed.csv"  # 🔧 [전력수요 변경] 신규
++OBSERVED_COLUMNS = ["Date", "Demand", "Temp", "Holiday"]  # 🔧 [전력수요 변경] 신규
+ 
+ 
+ def latest_upload(upload_dir: str = UPLOAD_DIR) -> str:
+@@ -18,7 +27,19 @@
+     files = sorted(glob.glob(os.path.join(upload_dir, "*.csv")), key=os.path.getmtime)
+     if not files:
+         raise FileNotFoundError(
+-            "업로드된 HAIC 데이터가 없습니다. 대시보드에서 CSV 파일을 먼저 업로드하세요 "
+-            f"(data/sample_haic_prices.csv를 예시로 업로드해볼 수 있습니다 -> {upload_dir}/)."
++            "업로드된 전력수요 데이터가 없습니다. 대시보드에서 CSV 파일을 먼저 업로드하세요 "
++            f"(data/sample_power_daily.csv를 예시로 업로드해볼 수 있습니다 -> {upload_dir}/)."
+         )
+     return files[-1]
++
++
++# 🔧 [전력수요 변경] 신규 함수 — 서빙 중 관측된 실제 데이터를 누적 저장
++def append_observed(records: list[dict], path: str = OBSERVED_PATH) -> None:
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    is_new = not os.path.exists(path)
++    with open(path, "a", encoding="utf-8", newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=OBSERVED_COLUMNS)
++        if is_new:
++            writer.writeheader()
++        for r in records:
++            writer.writerow({k: r[k] for k in OBSERVED_COLUMNS})
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/aggregate_metrics.py 2_전력수요_AIOps/scripts/aggregate_metrics.py
+--- 1_빈칸정답_HAIC/scripts/aggregate_metrics.py	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/scripts/aggregate_metrics.py	2026-10-02 09:15:58
+@@ -0,0 +1,68 @@
++"""
++🆕 [데모 대시보드 추가] (신규 파일) requests.log 를 시간 구간별로 집계.
++
++교수님 Dockerfile 주석("routers/metrics.py가 scripts.aggregate_metrics를 import함")에 남아 있던
++데모 패키지 구조를 따라, 집계 로직은 scripts/ 에 두고 routers/metrics.py 가 import 해서 씁니다.
++터미널에서 단독 실행도 됩니다:  python scripts/aggregate_metrics.py 1h
++
++집계 항목 (window 안의 요청만)
++  requests      : 요청 수
++  avg_latency_ms: 평균 응답시간
++  p95_latency_ms: 느린 쪽 5% 경계 응답시간 (평균만 보면 가끔 매우 느린 요청이 묻힘)
++  success_rate  : 상태코드 2xx·3xx 비율 (%)
++  series        : window 를 12칸으로 나눈 칸별 요청 수·평균 응답시간·성공률 (대시보드 미니 그래프용)
++"""
++import math
++import os
++import sys
++import time
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from serving_app.monitoring.request_log import REQUESTS_LOG, read_jsonl
++
++WINDOWS = {"5m": 5 * 60, "1h": 60 * 60, "6h": 6 * 60 * 60, "24h": 24 * 60 * 60}
++N_BUCKETS = 12
++
++
++def aggregate(window: str = "5m", now: float | None = None, path: str = REQUESTS_LOG) -> dict:
++    if window not in WINDOWS:
++        raise ValueError(f"window 는 {list(WINDOWS)} 중 하나")
++    now = now or time.time()
++    span = WINDOWS[window]
++    start = now - span
++    rows = [r for r in read_jsonl(path) if r.get("ts", 0) >= start]
++
++    lat = sorted(r["latency_ms"] for r in rows)
++    ok = [r for r in rows if 200 <= r["status"] < 400]
++
++    width = span / N_BUCKETS
++    buckets = [{"t": start + (i + 1) * width, "requests": 0, "lat_sum": 0.0, "ok": 0} for i in range(N_BUCKETS)]
++    for r in rows:
++        b = buckets[min(int((r["ts"] - start) // width), N_BUCKETS - 1)]
++        b["requests"] += 1
++        b["lat_sum"] += r["latency_ms"]
++        b["ok"] += 1 if 200 <= r["status"] < 400 else 0
++    series = [
++        {
++            "t": b["t"],
++            "requests": b["requests"],
++            "avg_latency_ms": round(b["lat_sum"] / b["requests"], 1) if b["requests"] else None,
++            "success_rate": round(b["ok"] / b["requests"] * 100, 1) if b["requests"] else None,
++        }
++        for b in buckets
++    ]
++    return {
++        "window": window,
++        "requests": len(rows),
++        "avg_latency_ms": round(sum(lat) / len(lat), 1) if lat else 0.0,
++        "p95_latency_ms": round(lat[max(0, math.ceil(len(lat) * 0.95) - 1)], 1) if lat else 0.0,
++        "success_rate": round(len(ok) / len(rows) * 100, 1) if rows else 100.0,
++        "series": series,
++    }
++
++
++if __name__ == "__main__":
++    import json
++
++    print(json.dumps(aggregate(sys.argv[1] if len(sys.argv) > 1 else "5m"), ensure_ascii=False, indent=2))
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/calibrate_on_validation.py 2_전력수요_AIOps/scripts/calibrate_on_validation.py
+--- 1_빈칸정답_HAIC/scripts/calibrate_on_validation.py	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/scripts/calibrate_on_validation.py	2026-10-01 17:12:26
+@@ -0,0 +1,178 @@
++"""
++🔧 [전력수요 변경] (신규 파일) 검증 기간(2024)으로 하이퍼파라미터·기준값을 정하는 스크립트.
++
++2025년은 마지막 평가에만 써야 하므로, 아래 결정은 모두 2024년 검증 데이터로 합니다.
++    학습 2021~2023  →  검증 2024  (스케일러도 2021~2023으로만 fit)
++    1) 모델 크기 비교   : LSTM (32,32,16) vs (64,32,16)
++    2) 기준값(RMSE)     : 2024년 28일 구간별 RMSE 최댓값을 5 GWh 단위로 올림
++                          → drift_detector.RMSE_THRESHOLD, train_and_register.RMSE_GATE 에 사용
++    3) 드리프트 시나리오: 2024년 42일 구간에 시나리오를 적용했을 때 기준값을 넘는지 확인하고,
++                          ramp 크기는 검증 구간 100%에서 감지되는 가장 작은 값으로 정함
++    4) 냉·난방도일 기준온도: 2021~2023 만으로 다시 골라도 14℃/19℃ 인지 확인
++
++결정이 끝나면 최종 모델은 scripts/train_baseline_v1.py, serving_app/train_and_register.py 가
++2021~2024 전체로 다시 학습하고, 2025년으로 한 번만 평가합니다.
++
++실행: python scripts/calibrate_on_validation.py   (결과는 docs/검증기간_보정결과.json 에도 저장)
++"""
++import json
++import math
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++import numpy as np
++from tensorflow import keras
++
++from data import features
++from data.drift_scenarios import apply_scenario
++from data.features import SEQ_LEN, N_FEATURES, PowerScaler, build_sequences, load_rows
++
++TRAIN_END = "2024-01-01"  # 이 날짜 전 = 학습
++VAL_END = "2025-01-01"  # 이 날짜 전 = 검증 (2025는 읽기만 하고 쓰지 않음)
++WINDOW = 28
++EPOCHS = 100
++OUT_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "검증기간_보정결과.json")
++
++
++def build(units):
++    model = keras.Sequential(
++        [
++            keras.layers.Input(shape=(SEQ_LEN, N_FEATURES)),
++            keras.layers.LSTM(units[0], return_sequences=True),
++            keras.layers.LSTM(units[1], return_sequences=True),
++            keras.layers.LSTM(units[2]),
++            keras.layers.Dense(16, activation="relu"),
++            keras.layers.Dense(1),
++        ]
++    )
++    model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3), loss="mse")
++    return model
++
++
++def rmse(a, b):
++    a, b = np.asarray(a), np.asarray(b)
++    return float(np.sqrt(np.mean((a - b) ** 2)))
++
++
++def mape(a, b):
++    a, b = np.asarray(a), np.asarray(b)
++    return float(np.mean(np.abs(a - b) / a) * 100)
++
++
++def choose_degree_day_bases(rows):
++    """2021~2023 만으로 냉·난방도일 기준온도를 다시 고른다 (요일·휴일 더미 + HDD + CDD 선형회귀 R²)."""
++    from datetime import date
++
++    y = np.array([r["Demand"] for r in rows])
++    t = np.array([r["Temp"] for r in rows])
++    dow = np.array([date.fromisoformat(r["Date"]).weekday() for r in rows])
++    hol = np.array([r["Holiday"] for r in rows])
++    base = np.column_stack([np.ones(len(rows))] + [(dow == k).astype(float) for k in range(1, 7)] + [hol])
++    best = None
++    for hb in np.arange(10, 20.5, 0.5):
++        for cb in np.arange(18, 26.5, 0.5):
++            X = np.column_stack([base, np.clip(hb - t, 0, None), np.clip(t - cb, 0, None), np.arange(len(rows))])
++            beta, *_ = np.linalg.lstsq(X, y, rcond=None)
++            r2 = 1 - ((y - X @ beta) ** 2).sum() / ((y - y.mean()) ** 2).sum()
++            if best is None or r2 > best[0]:
++                best = (float(r2), float(hb), float(cb))
++    return best
++
++
++def main():
++    np.seterr(all="ignore")
++    rows_all = load_rows("data/sample_power_daily.csv")
++    rows = [r for r in rows_all if r["Date"] < VAL_END]  # 2025 행은 여기서 버림
++    train_rows = [r for r in rows if r["Date"] < TRAIN_END]
++
++    r2, hb, cb = choose_degree_day_bases(train_rows)
++    print(f"[4] 냉·난방도일 기준온도 (2021~2023 만): HDD {hb}℃ / CDD {cb}℃ (R²={r2:.4f}) "
++          f"| 현재 설정 HDD {features.HDD_BASE} / CDD {features.CDD_BASE}")
++
++    scaler = PowerScaler().fit(train_rows)
++    X, y, dates = build_sequences(rows, scaler)
++    split = next(k for k, d in enumerate(dates) if d >= TRAIN_END)
++    X = np.array(X, dtype="float32")
++    X_tr, X_val = X[:split], X[split:]
++    y_tr, y_val = np.array(y[:split]), np.array(y[split:])
++    y_tr_s = np.array([scaler.scale_demand(v) for v in y_tr], dtype="float32")
++    print(f"학습 {len(X_tr)}개 ({dates[0]}~{dates[split - 1]}) / 검증 {len(X_val)}개 ({dates[split]}~{dates[-1]})")
++
++    # 1) 모델 크기 비교
++    results, models = {}, {}
++    for units in [(32, 32, 16), (64, 32, 16)]:
++        keras.utils.set_random_seed(42)
++        m = build(units)
++        m.fit(X_tr, y_tr_s, epochs=EPOCHS, verbose=0)
++        pred = np.array([scaler.inverse_demand(v) for v in m.predict(X_val, verbose=0).flatten()])
++        results[str(units)] = {"rmse": rmse(y_val, pred), "mape": mape(y_val, pred)}
++        models[units] = (m, pred)
++        print(f"[1] LSTM {units}: 검증 RMSE {results[str(units)]['rmse']:.1f} GWh, MAPE {results[str(units)]['mape']:.2f}%")
++
++    all_y = np.array([r["Demand"] for r in rows])
++    n_val = len(y_val)
++    naive = {}
++    for name, lag in [("어제와 같음", 1), ("지난주 같은 요일", 7)]:
++        p = all_y[len(all_y) - n_val - lag : len(all_y) - lag]
++        naive[name] = {"rmse": rmse(y_val, p), "mape": mape(y_val, p)}
++        print(f"    기준선 {name}: 검증 RMSE {naive[name]['rmse']:.1f} GWh, MAPE {naive[name]['mape']:.2f}%")
++
++    # 채택: 검증 RMSE 차이가 1 GWh 미만이면 더 작은(원본) 모델
++    small, big = (32, 32, 16), (64, 32, 16)
++    chosen = big if results[str(big)]["rmse"] < results[str(small)]["rmse"] - 1.0 else small
++    print(f"    → 채택: {chosen}")
++    m, pred = models[chosen]
++
++    # 2) 기준값: 검증 기간 28일 구간별 RMSE
++    err2 = (y_val - pred) ** 2
++    roll = np.sqrt(np.convolve(err2, np.ones(WINDOW) / WINDOW, mode="valid"))
++    threshold = float(math.ceil(roll.max() / 5) * 5)
++    worst_end = dates[split + WINDOW - 1 + int(roll.argmax())]
++    print(f"[2] 2024년 28일 구간 RMSE: 중앙값 {np.median(roll):.1f} / 95% {np.percentile(roll, 95):.1f} / "
++          f"최댓값 {roll.max():.1f} (~{worst_end}) → 기준값 {threshold:.0f} GWh")
++
++    # 3) 드리프트 시나리오 확인 (2024년 42일 구간, 7일 간격)
++    val_rows = rows[split:]  # 정답이 2024인 첫 샘플의 창문 시작 행부터
++    scen = {}
++    cases = [("normal", None)] + [(f"ramp+{int(m * 100)}%", m) for m in (0.20, 0.25, 0.30, 0.35)] + [("level", None), ("temp_bias", None)]
++    for name, ramp_max in cases:
++        vals = []
++        for k in range(0, len(val_rows) - (WINDOW + SEQ_LEN) + 1, 7):
++            sl = [dict(r) for r in val_rows[k : k + WINDOW + SEQ_LEN]]
++            if name.startswith("ramp"):
++                apply_scenario(sl, "ramp", ramp_max)
++            elif name != "normal":
++                apply_scenario(sl, name)
++            Xs, ys, _ = build_sequences(sl, scaler)
++            ps = [scaler.inverse_demand(v) for v in m.predict(np.array(Xs, dtype="float32"), verbose=0).flatten()]
++            vals.append(rmse(ys, ps))
++        vals = np.array(vals)
++        detected = float((vals > threshold).mean() * 100)
++        scen[name] = {"median": float(np.median(vals)), "min": float(vals.min()), "max": float(vals.max()),
++                      "over_threshold_pct": detected, "n": int(len(vals))}
++        print(f"[3] {name:10s}: RMSE 중앙값 {np.median(vals):.1f} / 최소 {vals.min():.1f} / 최대 {vals.max():.1f} "
++              f"→ 기준값 초과 {detected:.0f}% ({len(vals)}구간)")
++
++    ramp_ok = [m for n_, m in cases if m is not None and scen[n_]["over_threshold_pct"] == 100.0]
++    print(f"    → ramp 크기: 검증 100% 감지되는 최소값 = +{int(min(ramp_ok) * 100)}%" if ramp_ok else "    → 100% 감지되는 ramp 없음")
++
++    out = {
++        "split": {"train": f"{dates[0]}~{dates[split - 1]}", "validation": f"{dates[split]}~{dates[-1]}",
++                  "test(미사용)": "2025-01-01~2025-12-31"},
++        "degree_day_bases_2021_2023": {"HDD": hb, "CDD": cb, "r2": r2},
++        "model_size": results, "chosen_units": list(chosen), "naive": naive,
++        "rolling28_rmse": {"median": float(np.median(roll)), "p95": float(np.percentile(roll, 95)),
++                           "max": float(roll.max()), "max_window_end": worst_end},
++        "threshold_gwh": threshold, "scenarios": scen,
++        "ramp_max_chosen": min(ramp_ok) if ramp_ok else None,
++    }
++    os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)
++    with open(OUT_JSON, "w", encoding="utf-8") as f:
++        json.dump(out, f, ensure_ascii=False, indent=2)
++    print(f"saved -> {os.path.normpath(OUT_JSON)}")
++
++
++if __name__ == "__main__":
++    main()
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/simulate_drift.py 2_전력수요_AIOps/scripts/simulate_drift.py
+--- 1_빈칸정답_HAIC/scripts/simulate_drift.py	2026-10-01 16:49:51
++++ 2_전력수요_AIOps/scripts/simulate_drift.py	2026-10-01 17:13:25
+@@ -1,16 +1,22 @@
+ """
+-Day3 드리프트 감지 시뮬레이션 (119~123번 슬라이드).
++Day3 드리프트 감지 시뮬레이션.
+ 
+ 핵심 프로세스:
+-    1) 기준 통계 산출   - 학습에 쓴 3년치 HAIC 데이터의 평균·표준편차 계산
+-    2) 정상 입력 테스트 - 같은 분포의 데이터로 예측 -> RMSE $4 이내 확인 (베이스라인)
+-    3) 드리프트 데이터 생성 - 변동성을 인위적으로 3배 키운 가격 데이터 생성
+-    4) 드리프트 데이터 주입 - 생성한 데이터를 서빙 서버에 연속 요청으로 전송
+-    5) 결과 관찰       - RMSE 상승 -> 알림 로그 발생 -> 재학습 트리거 확인
++    1) 기준 통계 산출   - 학습에 쓴 데이터(2021~2024)의 일 수요 평균·표준편차 계산
++    2) 정상 입력 테스트 - 학습에 안 쓴 2025년 실제 42일 → RMSE 75 GWh 이내 확인 (베이스라인)
++    3) 드리프트 데이터 생성 - 같은 실제 42일에 수요 점진 증가(0→+25%) 등 인위적 변화 적용
++    4) 드리프트 데이터 주입 - 생성한 데이터를 서빙 서버에 요청으로 전송
++    5) 결과 관찰       - RMSE 상승 -> 알림 로그 -> 재학습 트리거 -> 새 버전 승격 확인
+ 
+-사전 준비: uvicorn serving_app.main:app 서버가 이미 떠 있어야 합니다.
+-실행: python scripts/simulate_drift.py
++🔧 [전력수요 변경] 요약
++   - 랜덤워크 가짜 주가 → 업로드된 CSV 의 2025년 실제 일별 기록 (data/drift_scenarios.py)
++   - 드리프트 = 변동성 3배 → 수요 구조 변화(ramp, 기본) / 일괄 증가(level) / 기온 센서 오류(temp_bias)
++   - API 주소를 환경변수 API_URL 로 바꿀 수 있게 함, 시나리오·시드를 명령행 인자로 선택
++
++사전 준비: uvicorn serving_app.main:app --port 8077 서버가 이미 떠 있어야 합니다.
++실행: python scripts/simulate_drift.py [--scenario ramp|level|temp_bias] [--seed 0]
+ """
++import argparse
+ import os
+ import sys
+ 
+@@ -18,75 +24,45 @@
+ import requests
+ 
+ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+-from data.features import load_rows
++from data.drift_scenarios import SCENARIOS, make_batch  # 🔧 [전력수요 변경]
++from data.features import TEST_START, load_rows
+ from data.storage import latest_upload
+ 
+-API_URL = "http://localhost:8077/predict/batch-test"
++API_URL = os.getenv("API_URL", "http://localhost:8077/predict/batch-test")  # 🔧 [전력수요 변경] 환경변수 허용
+ 
+ 
+ def compute_baseline_stats(csv_path: str | None = None) -> tuple[float, float]:
+-    """1단계: 학습에 사용한 데이터(업로드된 최신 CSV)의 평균·표준편차."""
++    """1단계: 학습에 사용한 데이터(2025 이전)의 일 수요 평균·표준편차."""
+     rows = load_rows(csv_path or latest_upload())
+-    closes = np.array([r["Close"] for r in rows])
+-    return float(closes.mean()), float(closes.std())
++    demands = np.array([r["Demand"] for r in rows if r["Date"] < TEST_START])  # 🔧 [전력수요 변경]
++    return float(demands.mean()), float(demands.std())
+ 
+ 
+-# SEQ_LEN(20) + WINDOW_SIZE(21) = 41개를 보내야 배치 하나당 정확히 WINDOW_SIZE(21)개의
+-# (predicted, actual) 쌍이 쌓여, drift_detector.py가 바로 판정할 수 있다.
+-BATCH_N = 41
+-
+-# 학습 데이터(실제 IBM 시세 기반)는 추세·모멘텀이 있는 시계열이라, 평균 주변의 순수
+-# 백색잡음(iid noise)을 넣으면 "정상" 입력조차 모델이 못 맞춰 오탐(false positive)이
+-# 납니다. 그래서 정상/드리프트 배치 모두 일별 수익률(log return) 기반의 랜덤워크로
+-# 만들고, 그 수익률의 표준편차(변동성)만 다르게 줍니다.
+-NORMAL_SIGMA = 0.012  # 학습 데이터의 안정적 구간과 비슷한 일별 변동성 (~1.2%)
+-DRIFT_SIGMA = NORMAL_SIGMA * 3  # 변동성을 3배 키운 드리프트
+-
+-
+-def _random_walk(n: int, base: float, sigma: float) -> np.ndarray:
+-    log_returns = np.random.normal(0, sigma, n)
+-    return base * np.exp(np.cumsum(log_returns))
+-
+-
+-def generate_normal_batch(n=BATCH_N, base=165.0, sigma=NORMAL_SIGMA):
+-    """학습 데이터와 비슷한 변동성의 정상 입력(랜덤워크)."""
+-    return _random_walk(n, base, sigma)
+-
+-
+-def generate_drift_batch(n=BATCH_N, base=165.0, sigma=DRIFT_SIGMA):
+-    """변동성을 3배 키운 드리프트 입력 (의도적으로 오차 유발)."""
+-    return _random_walk(n, base, sigma)
+-
+-
+-def send_batch(prices: np.ndarray, label: str) -> dict:
+-    # TODO(Day3): 생성한 배치를 /predict/batch-test 엔드포인트에 순차(또는 일괄) 요청으로 전송하세요.
+-    # 힌트:
+-    # resp = requests.post(API_URL, json={"prices": prices.tolist()})
+-    # resp.raise_for_status()
+-    # result = resp.json()
+-    # print(f"[{label}] drift_check = {result['drift_check']}")
+-    # return result
++def send_batch(records: list[dict], label: str) -> dict:
+     # ✅ [TODO 4-2 정답] /predict/batch-test 로 배치를 일괄 전송하고 drift_check 결과를 출력
+-    resp = requests.post(API_URL, json={"prices": prices.tolist()})
++    resp = requests.post(API_URL, json={"records": records})  # 🔧 [전력수요 변경] prices → records
+     resp.raise_for_status()
+     result = resp.json()
+-    print(f"[{label}] drift_check = {result['drift_check']}")
++    print(f"[{label}] {records[0]['date']} ~ {records[-1]['date']}  drift_check = {result['drift_check']}")
+     return result
+ 
+ 
+ def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--scenario", choices=SCENARIOS, default="ramp")
++    parser.add_argument("--seed", type=int, default=None)
++    args = parser.parse_args()
++
+     mean, std = compute_baseline_stats()
+-    print(f"[1] 기준 통계: mean={mean:.2f}, std={std:.2f}")
++    print(f"[1] 기준 통계(2021~2024): 일 수요 mean={mean:.1f} GWh, std={std:.1f} GWh")
+ 
+-    print("[2] 정상 입력 테스트 전송...")
+-    normal_batch = generate_normal_batch(base=mean)
+-    send_batch(normal_batch, label="normal")
++    print("[2] 정상 입력 테스트 전송 (2025년 실제 42일)...")
++    send_batch(make_batch("normal", seed=args.seed), label="normal")
+ 
+-    print("[3-4] 드리프트 입력 생성·주입...")
+-    drift_batch = generate_drift_batch(base=mean)
+-    send_batch(drift_batch, label="drift_injection")
++    print(f"[3-4] 드리프트 입력 생성·주입 (scenario={args.scenario})...")
++    send_batch(make_batch("drift", scenario=args.scenario, seed=args.seed), label="drift_injection")
+ 
+-    print("[5] 결과 확인: requests.log 또는 서버 콘솔에서 [WARN] drift detected 로그를 확인하세요.")
++    print("[5] 결과 확인: logs/aiops.log 또는 대시보드 '재학습 로그'에서 [WARN] → [INFO] → [OK] 순서를 확인하세요.")
+ 
+ 
+ if __name__ == "__main__":
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/scripts/train_baseline_v1.py 2_전력수요_AIOps/scripts/train_baseline_v1.py
+--- 1_빈칸정답_HAIC/scripts/train_baseline_v1.py	2026-10-01 16:49:42
++++ 2_전력수요_AIOps/scripts/train_baseline_v1.py	2026-10-01 17:13:25
+@@ -1,33 +1,26 @@
+ """
+ [Day1 사전 준비] 로컬 baseline 모델 만들기  —  scripts/train_baseline_v1.py
+-【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
+-   ___ 가 남은 채 실행하면 "name '___' is not defined" 에러가 나며, 그 줄이 채울 곳입니다.
+ 
+ ■ 이 파일이 하는 일 (한 줄 요약)
+-   업로드된 주가 CSV로 LSTM 모델을 학습시키고,
++   업로드된 전력수요 CSV로 LSTM 모델을 학습시키고,
+    서버가 읽어 갈 파일 2개(스케일러, 모델)를 만들어 둡니다.
+ 
+-■ 왜 필요한가요?
+-   Day1 서버(FastAPI)는 직접 학습하지 않고, "이미 학습된 모델 파일"을 읽어서 예측만 합니다.
+-   Day2에서 MLflow를 배우기 전까지는 이 스크립트가 만든 파일이 서버의 유일한 모델입니다.
+-
+ ■ 만들어지는 파일 (이름·위치를 바꾸지 마세요 — 서버가 이 경로로 찾습니다)
+    serving_app/models/scaler.pkl      ← 숫자를 0~1로 바꿔 주는 '자' (Day1~3 내내 계속 사용)
+-   serving_app/models/haic_v1.keras   ← 학습된 LSTM 모델
++   serving_app/models/power_v1.keras  ← 학습된 LSTM 모델
+ 
+ ■ 실행 순서
+    1) 서버 실행       : uvicorn serving_app.main:app --host 0.0.0.0 --port 8077
+-   2) 데이터 업로드   : 대시보드(http://localhost:8077)에서 data/sample_haic_prices.csv 업로드
++   2) 데이터 업로드   : 대시보드(http://localhost:8077)에서 data/sample_power_daily.csv 업로드
+    3) 이 파일 실행    : (다른 터미널에서) python scripts/train_baseline_v1.py
+ 
+-■ 다 됐는지 확인하는 법
+-   약 1분 뒤 터미널에 아래 3줄이 나오고, RMSE 가 대략 2~4 사이면 성공입니다.
+-     scaler fit on 756행 -> serving_app/models/scaler.pkl
+-     baseline v1 RMSE = x.xx  (배포 게이트: $4.00)
+-     saved -> serving_app/models/haic_v1.keras
+-   ※ RMSE 가 수십 이상으로 크게 나오면 [빈칸 1]을 다시 보세요.
++■ 빈칸 정답 위치 : [빈칸 1]
+ 
+-■ 이 파일의 빈칸 : [빈칸 1]
++🔧 [전력수요 변경] 요약
++   - 학습 2021~2024 / 평가 2025 (날짜 기준 분할, 원본은 앞 80% / 뒤 20%)
++   - 스케일러를 "학습 기간(2025 이전)" 데이터로만 fit
++     (원본은 전체 데이터로 fit → 평가 구간의 최소·최대가 학습에 새어 들어감)
++   - RMSE 단위 달러 → GWh, 게이트 $4.00 → 75 GWh, MAPE(%)와 기준선(어제/지난주 같은 요일)도 함께 출력
+ """
+ import os
+ import sys
+@@ -35,83 +28,88 @@
+ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ 
+ # 이 파일에서 쓰는 도구들 (모두 이미 만들어져 있습니다)
+-#   load_rows        : CSV 파일 → [{"Date":..., "Close":..., "Volume":...}, ...]
+-#   build_sequences  : 행 목록 → 학습용 문제(X)와 정답(y)
+-#   train_test_split : 앞 80%는 공부용(train), 뒤 20%는 시험용(test)으로 나누기
+-#   HAICScaler       : 0~1로 바꾸기(transform_point, scale_close) / 달러로 되돌리기(inverse_close)
++#   load_rows        : CSV 파일 → [{"Date":..., "Demand":..., "Temp":..., "Holiday":...}, ...]
++#   build_sequences  : 행 목록 → 학습용 문제(X)와 정답(y), 정답 날짜(dates)
++#   train_test_split : 2025-01-01 이전은 공부용(train), 이후는 시험용(test)으로 나누기
++#   PowerScaler      : 0~1로 바꾸기(transform_point, scale_demand) / GWh로 되돌리기(inverse_demand)
+ #   latest_upload    : data/uploads/ 에서 가장 최근 올린 CSV 경로
+ #   build_model      : LSTM 모델 뼈대 만들기
+-from data.features import load_rows, build_sequences, train_test_split, HAICScaler
++from data.features import load_rows, build_sequences, train_test_split, PowerScaler, TEST_START  # 🔧 [전력수요 변경]
+ from data.storage import latest_upload
+ from serving_app.lstm_model import build_model
+ 
+-MODEL_PATH = "serving_app/models/haic_v1.keras"
++MODEL_PATH = "serving_app/models/power_v1.keras"  # 🔧 [전력수요 변경] haic_v1.keras → power_v1.keras
+ SCALER_PATH = "serving_app/models/scaler.pkl"
+ BASE_EPOCHS = 100  # 전체 문제를 100번 반복해서 학습
++RMSE_GATE = 75.0  # 🔧 [전력수요 변경] $4.00 → 75 GWh (2024 검증으로 정한 값, train_and_register.py 와 같음)
+ 
+ 
+ def rmse(y_true, y_pred) -> float:
+-    """예측이 실제보다 '평균 몇 달러' 틀렸는지 계산합니다."""
++    """예측이 실제보다 '평균 몇 GWh' 틀렸는지 계산합니다."""
+     return (sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / len(y_true)) ** 0.5
+ 
+ 
++def mape(y_true, y_pred) -> float:
++    """🔧 [전력수요 변경] (신규) 평균 몇 % 틀렸는지 — 단위가 없어 기준선과 비교하기 쉬움."""
++    return sum(abs(a - b) / a for a, b in zip(y_true, y_pred)) / len(y_true) * 100
++
++
+ def main():
+     import numpy as np
++    from tensorflow import keras
+ 
+-    # STEP 1. 데이터 읽기 — 가장 최근 업로드한 CSV를 행 목록으로 (756행)
++    keras.utils.set_random_seed(42)  # 🔧 [전력수요 변경] 재현성을 위해 시드 고정 (train_and_register.py 와 동일)
++
++    # STEP 1. 데이터 읽기 — 가장 최근 업로드한 CSV를 행 목록으로 (2021~2025, 1,826행)
+     rows = load_rows(latest_upload())
+ 
+     # STEP 2. 스케일러 만들고 저장하기
+-    #   종가(100~200)와 거래량(100만 단위)은 크기 차이가 너무 커서, 그대로 넣으면
+-    #   LSTM이 큰 숫자(거래량)에만 끌려갑니다. 그래서 둘 다 0~1로 맞춰 줍니다.
+-    #   스케일러는 "여기서 딱 한 번만" fit 하고 저장합니다. 서버·Day2·Day3 모두 이 파일을 씁니다.
+-    scaler = HAICScaler().fit(rows)
++    #   수요(1,000~2,000 GWh)와 기온(-13~30℃)은 크기 차이가 커서 둘 다 0~1로 맞춰 줍니다.
++    # 🔧 [전력수요 변경] fit 은 학습 기간(2025 이전) 행으로만 — 평가 데이터 정보 누수 방지
++    train_rows = [r for r in rows if r["Date"] < TEST_START]
++    scaler = PowerScaler().fit(train_rows)
+     scaler.save(SCALER_PATH)
+-    print(f"scaler fit on {len(rows)}행 -> {SCALER_PATH}")
++    print(f"scaler fit on {len(train_rows)}행 (~{TEST_START} 이전) -> {SCALER_PATH}")
+ 
+     # STEP 3. 문제(X)와 정답(y) 만들기
+-    #   "최근 20일치 (종가, 거래량)을 보고 → 21일째 종가를 맞혀라" 는 문제를 하루씩 밀며 만듭니다.
+-    #   X = 문제 목록 (0~1로 변환됨),  y = 정답 종가 목록 (주의: 아직 "달러" 그대로!)
+-    X, y = build_sequences(rows, scaler)
++    #   "최근 14일 수요 + 다음날 기온·휴일·요일을 보고 → 다음날 수요를 맞혀라"를 하루씩 밀며 만듭니다.
++    X, y, dates = build_sequences(rows, scaler)  # 🔧 [전력수요 변경] 정답 날짜(dates)도 함께 받음
+ 
+-    # STEP 4. 공부용 / 시험용 나누기
+-    #   주가는 시간 순서가 중요하므로 섞지 않고 "앞 80% 공부 / 뒤 20% 시험"으로 나눕니다.
+-    X_train, y_train, X_test, y_test = train_test_split(X, y)
++    # STEP 4. 공부용 / 시험용 나누기 — 🔧 [전력수요 변경] 비율 대신 날짜 기준 (2021~2024 / 2025)
++    X_train, y_train, X_test, y_test = train_test_split(X, y, dates)
+     X_train = np.array(X_train, dtype="float32")
+     X_test = np.array(X_test, dtype="float32")
++    print(f"train {len(X_train)}개 / test {len(X_test)}개")
+ 
+-    # STEP 5. 공부용 정답(y_train)도 0~1로 바꾸기   ← [빈칸 1]을 풀 때 꼭 다시 읽으세요
+-    #   문제(X_train)는 0~1 범위인데, 정답(y_train)은 아직 "달러"입니다. (STEP 3 주석 참고)
+-    #   문제는 0.4인데 정답은 150이면, 모델 출력이 150까지 억지로 끌려가야 해서 학습이 불안정해집니다.
+-    #   그래서 정답도 scale_close 로 0~1로 바꾼 y_train_scaled 를 따로 만들어 둡니다.
+-    y_train_scaled = np.array([scaler.scale_close(v) for v in y_train], dtype="float32")
++    # STEP 5. 공부용 정답(y_train)도 0~1로 바꾸기
++    y_train_scaled = np.array([scaler.scale_demand(v) for v in y_train], dtype="float32")
+ 
+     # STEP 6. 빈 LSTM 모델 만들기
+     model = build_model()
+ 
+-    # ════════════════════════════ [빈칸 1] ════════════════════════════
+-    # 모델을 학습시킬 "문제"와 "정답"을 넣어 주세요.  model.fit(문제, 정답, ...)
+-    #
+-    #   생각해 볼 질문
+-    #     · 지금 쓸 수 있는 변수: X, y, X_train, y_train, X_test, y_test, y_train_scaled
+-    #     · 시험용 데이터(X_test, y_test)가 학습에 섞이면 시험 점수(RMSE)는 믿을 수 있을까요?
+-    #     · 정답은 STEP 5에서 만든 y_train_scaled 와 원래 y_train 중 무엇이어야 할까요?
+     # ✅ [빈칸 1 정답] 문제=X_train, 정답=y_train_scaled (0~1로 바꾼 학습용 정답)
+     #    (원래 적혀 있던 y_test 는 의도된 오답: 시험 정답이 학습에 섞이고 X_train 과 길이도 안 맞음)
+     model.fit(X_train, y_train_scaled, epochs=BASE_EPOCHS, verbose=0)
+ 
+-    # STEP 7. 시험 보기 — 모델 출력(0~1)을 달러로 되돌린 뒤 실제 정답(y_test, 달러)과 비교
++    # STEP 7. 시험 보기 — 모델 출력(0~1)을 GWh로 되돌린 뒤 실제 정답(y_test)과 비교
+     preds_scaled = model.predict(X_test, verbose=0).flatten()
+-    preds = [scaler.inverse_close(p) for p in preds_scaled]  # 실제 달러 단위로 복원
++    preds = [scaler.inverse_demand(p) for p in preds_scaled]  # 실제 GWh 단위로 복원
+     score = rmse(y_test, preds)
+-    print(f"baseline v1 RMSE = {score:.2f}  (배포 게이트: $4.00)")
++    print(f"baseline v1 RMSE = {score:.1f} GWh, MAPE = {mape(y_test, preds):.2f}%  (배포 게이트: {RMSE_GATE:.0f} GWh)")
+ 
++    # 🔧 [전력수요 변경] (신규) 기준선과 비교 — LSTM 이 "어제와 같음"보다 나아야 쓸 의미가 있음
++    n_test = len(y_test)
++    all_y = [r["Demand"] for r in rows]
++    for name, lag in [("어제와 같음", 1), ("지난주 같은 요일", 7)]:
++        naive = all_y[len(all_y) - n_test - lag : len(all_y) - lag]
++        print(f"  기준선 {name:9s} RMSE = {rmse(y_test, naive):.1f} GWh, MAPE = {mape(y_test, naive):.2f}%")
++
+     # STEP 8. 모델 저장
+     model.save(MODEL_PATH)
+     print(f"saved -> {MODEL_PATH}")
+-    if score > 4.00:
++    if score > RMSE_GATE:
+         print(
+-            "※ 참고: 이 RMSE는 Day1 로컬 모델이며 배포 게이트($4.00) 통과 여부는 "
++            f"※ 참고: 이 RMSE는 Day1 로컬 모델이며 배포 게이트({RMSE_GATE:.0f} GWh) 통과 여부는 "
+             "Day2에서 MLflow로 다시 정식 검증합니다."
+         )
+ 
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/Dockerfile 2_전력수요_AIOps/serving_app/Dockerfile
+--- 1_빈칸정답_HAIC/serving_app/Dockerfile	2026-09-29 13:54:31
++++ 2_전력수요_AIOps/serving_app/Dockerfile	2026-10-02 09:23:04
+@@ -1,5 +1,6 @@
+-# Day2: HAIC 서빙 앱 컨테이너 이미지 (단일 컨테이너)
+-# 빌드/실행은 반드시 프로젝트 루트에서: docker build -f serving_app/Dockerfile -t haic-serving:v2 .
++# Day2: 전력수요 예측 서빙 앱 컨테이너 이미지 (단일 컨테이너)
++# 🔧 [전력수요 변경] 시드 데이터 sample_haic_prices.csv → sample_power_daily.csv, 이미지 태그 power-serving
++# 빌드/실행은 반드시 프로젝트 루트에서: docker build -f serving_app/Dockerfile -t power-serving:v2 .
+ # 참고: tensorflow가 들어가서 이미지가 (scikit-learn만 쓸 때보다) 훨씬 큽니다
+ #       (1GB대) - 빌드에 몇 분 걸릴 수 있습니다. (GPU 없는 컨테이너이지만 CPU로 정상 동작합니다)
+ FROM python:3.11-slim
+@@ -13,7 +14,8 @@
+ COPY serving_app/ serving_app/
+ COPY data/ data/
+ COPY scripts/ scripts/
+-# scripts/도 복사해야 함: routers/metrics.py가 scripts.aggregate_metrics를 import함
++# scripts/도 복사해야 함: 이미지 빌드 중 train_baseline_v1.py 를 실행하고,
++# routers/metrics.py 가 scripts.aggregate_metrics 를 import 함 (✏️ [데모 대시보드 수정] 교수님 원본 주석 내용으로 복원)
+ 
+ # 대시보드에서 업로드하는 것과 동일한 방식으로, 빌드용 샘플 데이터를 data/uploads/에
+ # 먼저 "업로드"해 둔 뒤 -> Day1 베이스라인(scaler.pkl) -> Day2 MLflow 학습/등록까지
+@@ -22,7 +24,7 @@
+ # 학습(등록)과 서빙이 항상 같은 컨테이너의 같은 파일시스템(/app) 안에서 이뤄집니다 -
+ # 여러 컨테이너가 네트워크로 서로의 모델/아티팩트를 찾아가야 하는 구조 자체가 없습니다.
+ RUN mkdir -p data/uploads \
+- && cp data/sample_haic_prices.csv data/uploads/build_seed.csv \
++ && cp data/sample_power_daily.csv data/uploads/build_seed.csv \
+  && python scripts/train_baseline_v1.py \
+  && python serving_app/train_and_register.py
+ 
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/lstm_model.py 2_전력수요_AIOps/serving_app/lstm_model.py
+--- 1_빈칸정답_HAIC/serving_app/lstm_model.py	2026-09-16 20:20:49
++++ 2_전력수요_AIOps/serving_app/lstm_model.py	2026-10-01 17:13:33
+@@ -1,17 +1,14 @@
+ """
+-HAIC 다음날 종가 예측용 LSTM 아키텍처 (Day1 baseline과 Day2 MLflow 학습이 공유).
++다음날 전력수요 예측용 LSTM 아키텍처 (Day1 baseline과 Day2 MLflow 학습이 공유).
+ 
+-3년치(~756거래일) 데이터 + SEQ_LEN(20)을 적용하면 학습 시퀀스가 약 590개까지 늘어나,
+-6개월/1층 구성 대비 파라미터 대비 샘플 비율이 충분히 개선됩니다. 그래서 LSTM 3층
+-(32 -> 32 -> 16, 앞 두 층은 return_sequences=True로 다음 LSTM에 전체 시퀀스를 넘김) +
+-Dense 1층 구조를 택했습니다 - 이 정도 크기(파라미터 약 1.6만 개)는 CPU로 50 epoch을
+-학습해도 수십 초~1분 내외면 끝납니다.
++🔧 [전력수요 변경] 층 구성은 교수님 원본(LSTM 32 → 32 → 16 + Dense 16 + Dense 1)을 그대로 두고,
++   입력 모양만 (20, 2) → (SEQ_LEN=14, N_FEATURES=7) 로 바꿨습니다.
++   크기는 2025년(테스트)이 아니라 2024년 검증 데이터로 골랐습니다 (scripts/calibrate_on_validation.py):
++   2021~2023 학습 → 2024 검증 RMSE  (32,32,16) 43.5 GWh  vs  (64,32,16) 44.1 GWh → 차이가 없어 원본 크기 유지
+ """
+ from tensorflow import keras
+ 
+-from data.features import SEQ_LEN
+-
+-N_FEATURES = 2  # (close, volume)
++from data.features import SEQ_LEN, N_FEATURES  # 🔧 [전력수요 변경] N_FEATURES 를 features.py 한 곳에서 관리
+ 
+ 
+ def build_model() -> keras.Model:
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/main.py 2_전력수요_AIOps/serving_app/main.py
+--- 1_빈칸정답_HAIC/serving_app/main.py	2026-09-29 15:00:02
++++ 2_전력수요_AIOps/serving_app/main.py	2026-10-02 09:16:17
+@@ -2,22 +2,29 @@
+ FastAPI 앱 진입점.
+ 
+ Day1: app 생성, 라우터(predict, health) 등록, startup 이벤트에서 로딩 모드에 따라 모델 준비
+-Day2: data 라우터 등록 (HAIC 데이터 업로드)
++Day2: data 라우터 등록 (전력수요 데이터 업로드)
+ Day3: "aiops" 로거를 logs/aiops.log 파일로 연결(로깅 설정) + logs 라우터(로그 파일 조회) 등록
+ 
++✏️ [데모 대시보드 수정] 교수님 데모처럼
++  - 모든 API 요청을 logs/requests.log 에 기록하는 미들웨어 추가 (운영 지표 요약의 재료)
++  - metrics 라우터(운영 지표·재학습 이력·현재 모델·알람·시스템 정보) 등록
++  - 대시보드: static/index.html 을 4탭 운영 대시보드로 새로 작성, 이전 화면은 static/basic.html 로 보존
++
+ 정적 대시보드: serving_app/static/index.html 이 /health · /predict · /predict/batch-test ·
+-/data/upload · /logs 를 호출하는 확인용 화면입니다. API 라우터를 먼저 등록한 뒤
++/data/upload · /logs · /metrics 를 호출하는 확인용 화면입니다. API 라우터를 먼저 등록한 뒤
+ StaticFiles를 "/"에 마지막으로 mount해야, /predict 같은 API 경로가 정적 파일보다
+ 먼저 매칭됩니다(Starlette는 등록 순서대로 라우트를 검사합니다).
+ """
+ import logging
+ import os
++import time  # ✏️ [데모 대시보드 수정] 요청 처리시간 측정용
+ 
+-from fastapi import FastAPI
++from fastapi import FastAPI, Request  # ✏️ [데모 대시보드 수정] Request 추가 (미들웨어)
+ from fastapi.staticfiles import StaticFiles
+ 
+ from serving_app import model_loader
+-from serving_app.routers import data, health, logs, predict
++from serving_app.monitoring.request_log import log_request  # 🆕 [데모 대시보드 추가]
++from serving_app.routers import data, health, logs, metrics, predict  # ✏️ [데모 대시보드 수정] metrics 추가
+ 
+ # monitoring/retrain_trigger.py가 쓰는 "aiops" 로거를 logs/aiops.log 파일에 연결한다.
+ # (routers/logs.py가 같은 디렉토리를 읽기 전용으로 노출한다.) 여기서 이 로거 하나만
+@@ -32,12 +39,34 @@
+     _aiops_logger.addHandler(_handler)
+     _aiops_logger.addHandler(logging.StreamHandler())  # 터미널에서도 동일하게 확인 가능
+ 
+-app = FastAPI(title="HAIC Serving & AIOps")
++app = FastAPI(title="전력수요 예측 Serving & AIOps")  # 🔧 [전력수요 변경] 제목
+ 
+ app.include_router(predict.router)
+ app.include_router(health.router)
+-app.include_router(data.router)  # HAIC 데이터 업로드
++app.include_router(data.router)  # 전력수요 데이터 업로드
+ app.include_router(logs.router)  # 대시보드: 재학습 로그 파일 조회
++app.include_router(metrics.router)  # 🆕 [데모 대시보드 추가] 운영 지표·재학습 이력·알람·시스템 정보
++
++# 🆕 [데모 대시보드 추가] 요청 로깅 미들웨어 — 모든 요청이 이 함수를 거쳐 갑니다.
++#   처리 전후 시각 차이로 응답시간을 재고, 결과(상태코드)와 함께 logs/requests.log 에 한 줄 남깁니다.
++#   대시보드 자체가 5초마다 부르는 /metrics, /logs 와 정적 파일(HTML·아이콘)은 "서비스 요청"이 아니라서 제외합니다.
++_NOT_SERVICE_PREFIXES = ("/metrics", "/logs")
++_SERVICE_PREFIXES = ("/predict", "/health", "/data")
++
++
++@app.middleware("http")
++async def request_logging(request: Request, call_next):
++    start = time.perf_counter()
++    status = 500  # 처리 중 예외가 나면 실패(500)로 기록
++    try:
++        response = await call_next(request)
++        status = response.status_code
++        return response
++    finally:
++        path = request.url.path
++        if path.startswith(_SERVICE_PREFIXES) and not path.startswith(_NOT_SERVICE_PREFIXES):
++            log_request(request.method, path, status, (time.perf_counter() - start) * 1000)
++
+ 
+ _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+ app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")  # 대시보드 UI
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/model_loader.py 2_전력수요_AIOps/serving_app/model_loader.py
+--- 1_빈칸정답_HAIC/serving_app/model_loader.py	2026-10-01 16:49:42
++++ 2_전력수요_AIOps/serving_app/model_loader.py	2026-10-01 16:54:23
+@@ -1,7 +1,5 @@
+ """
+ [Day1 → Day2] 모델 불러오기  —  serving_app/model_loader.py
+-【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
+-   ___ 가 남은 채 실행하면 "name '___' is not defined" 에러가 나며, 그 줄이 채울 곳입니다.
+ 
+ ■ 이 파일이 하는 일 (한 줄 요약)
+    서버가 예측에 쓸 모델을 "어디서, 언제" 불러올지 정하고, 예측 한 건을 수행합니다.
+@@ -9,7 +7,7 @@
+ 
+ ■ 핵심 개념
+    1) 학습 때와 똑같이 전처리해야 한다
+-        모델은 0~1 값으로 학습했습니다. 서빙할 때도 입력을 0~1로 바꾸고, 출력은 달러로 되돌려야 합니다.
++        모델은 0~1 값으로 학습했습니다. 서빙할 때도 입력을 0~1로 바꾸고, 출력은 GWh로 되돌려야 합니다.
+    2) Lazy vs Eager
+         Eager : 서버가 켜질 때 모델을 바로 불러옴 → 서버 시작은 느리지만 첫 요청이 빠름
+         Lazy  : 첫 /predict 요청이 올 때 불러옴  → 서버 시작은 빠르지만 첫 요청이 느림
+@@ -20,24 +18,24 @@
+    LOADING_MODE = lazy(기본) | eager
+    MODEL_SOURCE = local(기본, Day1) | mlflow(Day2~)
+ 
+-■ 이 파일의 빈칸
+-   [빈칸 2] [빈칸 3]  Day1 : predict_one() — 입력 변환 / 출력 복원
+-   [빈칸 4]           Day1 : get_model()   — Lazy Loading
+-   [빈칸 5]           Day2 : _load_from_mlflow() — MLflow 에서 불러오기
++■ 빈칸 정답 위치 : [빈칸 2] [빈칸 3] predict_one()   [빈칸 4] get_model()   [빈칸 5] _load_from_mlflow()
+ 
+-■ self.scaler(HAICScaler)가 가진 도구 — [빈칸 2]·[빈칸 3]은 이 중에서 고르는 문제입니다
+-   transform_point(종가, 거래량) → [0~1, 0~1]   하루치 입력 2개를 0~1로
+-   scale_close(종가)             → 0~1          종가 하나를 0~1로 (학습 정답용)
+-   inverse_close(0~1 값)         → 종가(달러)    0~1 값을 달러로 되돌리기
++🔧 [전력수요 변경] 요약
++   - HAICScaler → PowerScaler, 모델 파일 haic_v1.keras → power_v1.keras, 레지스트리 이름 → Power_Demand_Predictor
++   - predict_one(sequence) → predict_one(history, target): 예측 대상일의 기온·휴일을 함께 받음
++   - 응답 버전에 실제 레지스트리 버전 번호를 표시 ("production" → "production-v2")
++   - reset_cache() 추가: 재학습으로 새 버전이 승격되면 캐시를 비워 다음 요청부터 새 모델을 쓰게 함
++     (원본은 승격 후에도 서버를 재시작하기 전까지 예전 모델이 캐시에 남아 있었음)
+ """
+ import os
+ import time
+ 
+-from data.features import HAICScaler
++from data.features import PowerScaler, window_to_input  # 🔧 [전력수요 변경] HAICScaler → PowerScaler
+ 
+-LOCAL_MODEL_PATH = "serving_app/models/haic_v1.keras"
++LOCAL_MODEL_PATH = "serving_app/models/power_v1.keras"  # 🔧 [전력수요 변경] haic_v1.keras → power_v1.keras
+ SCALER_PATH = "serving_app/models/scaler.pkl"
+-MLFLOW_MODEL_URI = "models:/HAIC_Predictor/Production"  # "models:/<모델 이름>/<단계>" 형식
++MODEL_NAME = "Power_Demand_Predictor"  # 🔧 [전력수요 변경] HAIC_Predictor → Power_Demand_Predictor
++MLFLOW_MODEL_URI = f"models:/{MODEL_NAME}/Production"  # "models:/<모델 이름>/<단계>" 형식
+ 
+ _model_cache = None  # 한 번 불러온 모델을 담아 두는 상자 (처음엔 비어 있음 = None)
+ 
+@@ -48,85 +46,76 @@
+     local 모델이든 MLflow 모델이든 이 상자에 담으면 똑같은 방법(predict_one)으로 쓸 수 있습니다.
+     """
+ 
+-    def __init__(self, keras_model, scaler: HAICScaler, version: str):
++    def __init__(self, keras_model, scaler: PowerScaler, version: str):
+         self._keras_model = keras_model
+         self.scaler = scaler
+         self.version = version
+ 
+-    def predict_one(self, sequence: list[dict]) -> float:
++    def predict_one(self, history: list[dict], target: dict) -> float:
+         """
+-        20일치 데이터로 다음날 종가 1개를 예측합니다.
+-        받는 것  : sequence = [{"close": 160.0, "volume": 1200000}, ... 20개]  (오래된 날 → 최근 날)
+-        돌려줄 것: 다음날 예상 종가 (달러 단위, 예: 161.37)
++        🔧 [전력수요 변경] 14일치 기록 + 예측 대상일 정보로 다음날 수요 1개를 예측합니다.
++        받는 것  : history = [{"Date": "2025-01-01", "Demand": 1500.2, "Temp": -2.1, "Holiday": 1}, ... 14개]
++                   target  = {"Date": "2025-01-15", "Temp": -3.0, "Holiday": 0}  (Demand 없음 = 맞힐 값)
++        돌려줄 것: 다음날 예상 수요 (GWh)
+ 
+-        흐름:  [달러 값 20개] → ① 0~1로 변환 → ② 입력 모양 맞추기 → ③ 예측(0~1) → ④ 달러로 복원
+-        확인:  /predict 응답의 predicted_close 가 입력 종가와 비슷한 "달러" 값이면 성공
++        흐름:  [GWh·℃ 값 14일] → ① 0~1로 변환 → ② 입력 모양 맞추기 → ③ 예측(0~1) → ④ GWh로 복원
+         """
+         import numpy as np
+ 
+-        # ════════════════════════ [빈칸 2]  ① 0~1로 변환 ════════════════════════
+-        # 하루치(p)의 종가·거래량을 0~1로 바꾸는 스케일러 도구 이름을 채우세요. (파일 위 "도구" 목록에서 고르기)
+-        #   예) [{"close": 160.0, "volume": 1200000}, ...]  →  [[0.42, 0.31], ...]
+-        #
+-        #   생각해 볼 질문
+-        #     · 이 모델은 학습할 때 어떤 도구로 입력을 0~1로 바꿨을까요? (data/features.py 의 build_sequences 참고)
+-        #     · 서버에서 다른 방법으로 바꾸거나, 아예 안 바꾸고 넣으면 어떻게 될까요?
+         # ✅ [빈칸 2 정답] transform_point — 학습 때 build_sequences 가 쓴 것과 같은 변환
+-        scaled = [self.scaler.transform_point(p["close"], p["volume"]) for p in sequence]
++        # 🔧 [전력수요 변경] 하루치 변환을 window_to_input() 으로 감쌈 — 각 날의 수요 + "그다음 날"의 기온·휴일·요일.
++        #    window_to_input 안에서 scaler.transform_point 를 그대로 호출하므로 빈칸 2 의 정답과 같은 도구를 씁니다.
++        next_days = history[1:] + [target]
++        scaled = window_to_input(history, next_days, self.scaler)
+ 
+-        # ② 입력 모양 맞추기 — 모델은 "문제 여러 개"를 받으므로 1개라도 [ ]로 감쌉니다. (1, 20, 2)
+-        x = np.array([scaled], dtype="float32")  # (1, SEQ_LEN, 2)
++        # ② 입력 모양 맞추기 — 모델은 "문제 여러 개"를 받으므로 1개라도 [ ]로 감쌉니다. (1, 14, 7)
++        x = np.array([scaled], dtype="float32")  # (1, SEQ_LEN, N_FEATURES)
+ 
+         # ③ 예측 — 결과가 [[0.47]] 처럼 2겹이라 [0][0] 으로 숫자만 꺼냅니다. (아직 0~1 범위)
+         pred_scaled = float(self._keras_model.predict(x, verbose=0)[0][0])
+ 
+-        # ════════════════════════ [빈칸 3]  ④ 달러로 복원 ════════════════════════
+-        # 사용자에게 돌려줄 값을 만드는 스케일러 도구 이름을 채우세요. (파일 위 "도구" 목록에서 고르기)
+-        #
+-        #   생각해 볼 질문
+-        #     · pred_scaled 는 0.47 같은 값입니다. 이대로 응답하면 사용자는 무엇을 보게 될까요?
+-        #     · train_baseline_v1.py 의 STEP 7(시험 보기)에서는 예측값을 어떻게 처리했나요?
+-        # ✅ [빈칸 3 정답] inverse_close — 0~1 예측값을 달러로 복원
+-        return self.scaler.inverse_close(pred_scaled)
++        # ✅ [빈칸 3 정답] inverse_close — 0~1 예측값을 원래 단위로 복원
++        # 🔧 [전력수요 변경] inverse_close(달러) → inverse_demand(GWh)
++        return self.scaler.inverse_demand(pred_scaled)
+ 
+ 
+ # ═══════════════════════════════ 어디서 불러올까? ═══════════════════════════════
+ 
+ def _load_from_local() -> LoadedModel:
+-    """Day1: 로컬 파일에서 모델과 스케일러를 불러와 상자에 담습니다. ([빈칸 5]의 참고 예시)"""
++    """Day1: 로컬 파일에서 모델과 스케일러를 불러와 상자에 담습니다."""
+     from tensorflow import keras
+ 
+     keras_model = keras.models.load_model(LOCAL_MODEL_PATH)
+-    scaler = HAICScaler.load(SCALER_PATH)
++    scaler = PowerScaler.load(SCALER_PATH)
+     return LoadedModel(keras_model=keras_model, scaler=scaler, version="v1-local")
+ 
+ 
++def _production_version() -> str:
++    """🔧 [전력수요 변경] (신규) 현재 Production 단계 모델의 레지스트리 버전 번호를 조회."""
++    from mlflow.tracking import MlflowClient
++
++    try:
++        versions = MlflowClient().get_latest_versions(MODEL_NAME, stages=["Production"])
++        return versions[0].version if versions else "?"
++    except Exception:
++        return "?"
++
++
+ def _load_from_mlflow() -> LoadedModel:
+     """
+-    Day2: train_and_register.py 가 "HAIC_Predictor" 이름으로 등록하고 Production 으로 올려 둔 모델을
++    Day2: train_and_register.py 가 "Power_Demand_Predictor" 이름으로 등록하고 Production 으로 올려 둔 모델을
+     MLflow Model Registry 에서 불러옵니다.
+-
+-    확인 방법
+-      1) python serving_app/train_and_register.py   → "[GATE PASSED] ... promoted to Production"
+-      2) MODEL_SOURCE=mlflow uvicorn serving_app.main:app --host 0.0.0.0 --port 8077
+-      3) /predict 응답의 model_version 이 "production" 이고 predicted_close 가 달러 값이면 성공
+     """
+     import mlflow.tensorflow
+ 
+-    # 모델 : MLflow 레지스트리에서 "Production" 단계 모델을 불러옵니다. (완성)
++    # 모델 : MLflow 레지스트리에서 "Production" 단계 모델을 불러옵니다.
+     #   버전 번호 대신 단계(Production)로 불러오므로, 재배포 때 서버 코드를 고칠 필요가 없습니다.
+     keras_model = mlflow.tensorflow.load_model(MLFLOW_MODEL_URI)
+ 
+-    # ════════════════════════════ [빈칸 5] ════════════════════════════
+-    # 스케일러를 알맞은 곳에서 불러오세요. (바로 위 _load_from_local 과 비교해 보세요)
+-    #
+-    #   생각해 볼 질문
+-    #     · 모델은 MLflow 에서 가져왔습니다. 스케일러도 MLflow 에서 가져와야 할까요, 로컬 scaler.pkl 을 써야 할까요?
+-    #     · Day2 모델은 어떤 스케일러로 0~1 변환한 데이터로 학습했나요? (train_and_register.py 의 SCALER_PATH 참고)
+-    #     · 스케일러를 여기서 새로 fit 하면 어떤 일이 생길까요?
+     # ✅ [빈칸 5 정답] 스케일러는 MLflow 가 아니라 항상 로컬 scaler.pkl (Day1에서 fit 한 그 기준)
+-    scaler = HAICScaler.load(SCALER_PATH)
+-    return LoadedModel(keras_model=keras_model, scaler=scaler, version="production")
++    scaler = PowerScaler.load(SCALER_PATH)  # 🔧 [전력수요 변경] HAICScaler → PowerScaler
++    # 🔧 [전력수요 변경] version="production" → "production-v{번호}" (재배포 후 새 버전이 응답하는지 확인용)
++    return LoadedModel(keras_model=keras_model, scaler=scaler, version=f"production-v{_production_version()}")
+ 
+ 
+ def _load_model() -> LoadedModel:
+@@ -140,7 +129,7 @@
+ # ═══════════════════════════ 언제 불러올까? (Eager / Lazy) ═══════════════════════════
+ 
+ def load_eager() -> LoadedModel:
+-    """Eager Loading: 서버가 켜질 때(main.py 의 startup) 바로 불러와 상자에 넣어 둡니다. ([빈칸 4]의 참고 예시)"""
++    """Eager Loading: 서버가 켜질 때(main.py 의 startup) 바로 불러와 상자에 넣어 둡니다."""
+     start = time.time()
+     model = _load_model()
+     print(f"[eager] model loaded in {time.time() - start:.3f}s at startup")
+@@ -152,24 +141,21 @@
+ def get_model() -> LoadedModel:
+     """
+     Lazy Loading: 첫 요청이 들어올 때만 불러오고, 이후에는 상자(_model_cache)에 있는 것을 재사용합니다.
+-
+-    확인 방법
+-      · 서버를 켜고 /predict 를 두 번 호출 → "[lazy] model loaded in ..." 이 첫 번째에만 한 번 찍히면 성공
+-      · /health 의 model_loaded 가 첫 호출 전 false → 호출 후 true
+-      · 두 번째 호출이 첫 번째보다 훨씬 빠른지도 비교해 보세요
+     """
+     global _model_cache
+ 
+-    # ════════════════════════════ [빈칸 4] ════════════════════════════
+-    # "필요할 때 한 번만" 불러오도록 조건과 불러오는 코드를 채우세요.
+-    #
+-    #   생각해 볼 질문
+-    #     · 상자가 비어 있다는 것은 코드로 어떻게 확인할까요? (파일 위쪽 _model_cache 의 처음 값)
+-    #     · 이 조건문 없이 매번 불러오면, 동작은 할까요? 요청이 초당 100건이면 어떻게 될까요?
+-    #     · 불러오는 함수는 load_eager() 가 무엇을 호출하는지 보면 알 수 있습니다.
+     # ✅ [빈칸 4 정답] 상자가 비어 있을 때(None)만 _load_model() 로 한 번 불러옴
+     if _model_cache is None:
+         start = time.time()
+         _model_cache = _load_model()
+         print(f"[lazy] model loaded in {time.time() - start:.3f}s on first request")
+     return _model_cache
++
++
++def reset_cache() -> None:
++    """
++    🔧 [전력수요 변경] (신규) 재학습으로 새 Production 이 승격되면 retrain_trigger.py 가 호출합니다.
++    상자를 비워 두면 다음 요청 때 get_model() 이 새 Production 을 다시 불러옵니다 (무중단 재배포).
++    """
++    global _model_cache
++    _model_cache = None
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/monitoring/drift_detector.py 2_전력수요_AIOps/serving_app/monitoring/drift_detector.py
+--- 1_빈칸정답_HAIC/serving_app/monitoring/drift_detector.py	2026-10-01 16:49:42
++++ 2_전력수요_AIOps/serving_app/monitoring/drift_detector.py	2026-10-01 17:13:25
+@@ -1,60 +1,37 @@
+ """
+ [Day3] 드리프트 감지  —  serving_app/monitoring/drift_detector.py
+-【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
+-   ___ 가 남은 채 실행하면 "name '___' is not defined" 에러가 나며, 그 줄이 채울 곳입니다.
+ 
+ ■ 이 파일이 하는 일 (한 줄 요약)
+-   "최근 모델이 평균 몇 달러씩 틀리고 있는지(RMSE)"를 계산해서,
+-   4달러보다 많이 틀리면 "데이터가 달라졌다(드리프트)"고 판단합니다.
++   "최근 모델이 평균 몇 GWh씩 틀리고 있는지(RMSE)"를 계산해서,
++   75 GWh보다 많이 틀리면 "데이터가 달라졌다(드리프트)"고 판단합니다.
+ 
+-■ 드리프트가 뭔가요?
+-   모델은 과거 데이터로 공부했습니다. 그런데 시장 상황이 갑자기 바뀌면(예: 변동성 폭증)
+-   공부한 것과 다른 데이터가 들어와 예측이 크게 빗나가기 시작합니다. 이것이 드리프트입니다.
+-   그래서 최근 예측이 얼마나 틀렸는지 계속 지켜보다가, 너무 많이 틀리면 재학습을 시작합니다.
+-
+ ■ 판단 기준
+-   최근 21건(약 한 달 거래일)의 RMSE > $4.00  →  드리프트!
+-   · 21건보다 짧으면 : 우연한 한두 번 실수에도 경보가 울립니다.
+-   · 21건보다 길면   : 상황이 바뀌어도 늦게 알아챕니다.
++   최근 28건(4주)의 RMSE > 75 GWh  →  드리프트!
+ 
+-■ 이 파일의 빈칸 : [빈칸 7] compute_rmse   [빈칸 8] is_drift
++■ 빈칸 정답 위치 : [빈칸 7] compute_rmse   [빈칸 8] is_drift
++
++🔧 [전력수요 변경] 요약
++   - RMSE_THRESHOLD : $4.00 → 75 GWh
++       근거: 2025년(테스트)은 쓰지 않고 2024년 "검증" 데이터로 정했습니다 (scripts/calibrate_on_validation.py).
++             2021~2023으로 학습한 모델의 2024년 28일 구간별 RMSE: 중앙값 42.5 / 95% 61.6 / 최댓값 71.1 GWh
++             (최댓값은 추석·개천절 연휴가 낀 10월 초) → 5 단위로 올려 75 를 넘으면 "평소와 다른" 상태
++   - WINDOW_SIZE    : 21거래일 → 28일 (4주 — 요일이 정확히 4번씩 들어가 요일 편향이 없음)
+ """
+-RMSE_THRESHOLD = 4.00  # 이보다 많이 틀리면 드리프트
+-WINDOW_SIZE = 21       # 최근 21건을 봅니다
++RMSE_THRESHOLD = 75.0  # 🔧 [전력수요 변경] 4.00 달러 → 75 GWh (2024 검증으로 정함)
++WINDOW_SIZE = 28       # 🔧 [전력수요 변경] 21 → 28 (4주)
+ 
+ 
+ def compute_rmse(recent_predictions: list[dict]) -> float:
+     """
+-    받는 것  : [{"predicted": 100.0, "actual": 102.0}, {"predicted": 100.0, "actual": 98.0}, ...]
+-    돌려줄 것: RMSE (숫자 1개, "평균 몇 달러 틀렸나").  빈 목록이면 0.0
+-
+-    ■ RMSE 계산 4단계 — 먼저 손으로 풀어 보세요
+-                             1건째            2건째
+-       ① 오차 (실제-예측)    102-100 = +2     98-100 = -2
+-       ② 제곱               2² = 4           (-2)² = 4
+-       ③ 평균               (4 + 4) / 2 = 4
+-       ④ 제곱근             √4 = 2.0         → "평균 2달러 틀렸다"
+-
+-    확인 방법
+-      python -c "from serving_app.monitoring.drift_detector import compute_rmse; \
+-      print(compute_rmse([{'predicted':100,'actual':102},{'predicted':100,'actual':98}])); \
+-      print(compute_rmse([]))"
+-      → 2.0 과 0.0 이 나오면 성공
++    받는 것  : [{"predicted": 1600.0, "actual": 1640.0}, {"predicted": 1600.0, "actual": 1560.0}, ...]
++    돌려줄 것: RMSE (숫자 1개, "평균 몇 GWh 틀렸나").  빈 목록이면 0.0
+     """
+     import math
+ 
+-    # 기록이 하나도 없으면 0.0 (빈 목록이면 ③에서 0으로 나누기 에러가 나기 때문)
++    # 기록이 하나도 없으면 0.0 (빈 목록이면 0으로 나누기 에러가 나기 때문)
+     if not recent_predictions:
+         return 0.0
+ 
+-    # ════════════════════════════ [빈칸 7] ════════════════════════════
+-    # 위 4단계 중 ① 오차 와 ③ 평균 을 채우세요. (② 제곱 ** 2 와 ④ 제곱근 math.sqrt 는 이미 적혀 있습니다)
+-    #   · 첫 줄 ___ : 한 건(p)의 오차 = 실제 - 예측.   p 는 {"predicted": ..., "actual": ...}
+-    #   · 둘째 줄 ___ : errors_sq 의 평균 = 합계 ÷ 개수   (sum(목록), len(목록))
+-    #
+-    #   생각해 볼 질문
+-    #     · 이미 적힌 ** 2 를 빼고 오차를 그냥 평균 내면, 위 예시의 결과는 몇이 되나요? 그게 맞는 판단일까요?
+-    #     · 이미 적힌 math.sqrt 를 빼면 단위가 "달러"일까요, "달러²"일까요? 기준 $4.00 과 비교할 수 있을까요?
+     # ✅ [빈칸 7 정답] ① 오차 = 실제 - 예측,  ③ 평균 = 합 ÷ 개수
+     errors_sq = [(p["actual"] - p["predicted"]) ** 2 for p in recent_predictions]
+     return math.sqrt(sum(errors_sq) / len(errors_sq))
+@@ -63,15 +40,9 @@
+ def is_drift(recent_predictions: list[dict]) -> bool:
+     """
+     드리프트인지 True/False 로 판단합니다.
+-    흐름: (데이터 충분한가?) → 최근 21건만 골라서 → RMSE 계산 → 기준($4)보다 크면 드리프트
++    흐름: (데이터 충분한가?) → 최근 28건만 골라서 → RMSE 계산 → 기준(75 GWh)보다 크면 드리프트
+     """
+-    # ════════════════════════════ [빈칸 8] ════════════════════════════
+-    # "아직 판단하지 않는다(False)"로 끝내야 하는 조건을 채우세요.
+-    #
+-    #   생각해 볼 질문
+-    #     · 서버를 켜고 처음 3건만 들어왔는데 그중 1건이 크게 빗나갔다면, 재학습을 돌려야 할까요?
+-    #     · 판단에 필요한 최소 건수는 위에 어떤 이름의 상수로 정해져 있나요?
+-    # ✅ [빈칸 8 정답] 최근 기록이 WINDOW_SIZE(21)건 미만이면 아직 판단하지 않음
++    # ✅ [빈칸 8 정답] 최근 기록이 WINDOW_SIZE 건 미만이면 아직 판단하지 않음
+     if len(recent_predictions) < WINDOW_SIZE:
+         return False  # 아직 판단할 만큼 데이터가 쌓이지 않음
+     window = recent_predictions[-WINDOW_SIZE:]
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/monitoring/request_log.py 2_전력수요_AIOps/serving_app/monitoring/request_log.py
+--- 1_빈칸정답_HAIC/serving_app/monitoring/request_log.py	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/serving_app/monitoring/request_log.py	2026-10-02 09:15:30
+@@ -0,0 +1,54 @@
++"""
++🆕 [데모 대시보드 추가] (신규 파일) 요청 로그 · 드리프트 이력 기록.
++
++교수님 데모 대시보드의 "운영 지표 요약"은 requests.log 를 실제로 읽어 시간 구간별로 집계한 값입니다.
++이 파일은 그 재료를 남깁니다.
++  - logs/requests.log      : API 요청 1건 = JSON 1줄  (시각, 메서드, 경로, 상태코드, 처리시간 ms)
++                             → main.py 의 미들웨어가 모든 API 요청마다 log_request() 호출
++  - logs/drift_history.log : 드리프트 판정 1회 = JSON 1줄 (시각, 최근 28일 RMSE, 판정 결과)
++                             → retrain_trigger.check_and_trigger() 가 판정할 때마다 log_drift() 호출
++
++JSON 한 줄씩 쌓는 형식(JSON Lines)이라 사람이 열어 봐도 읽기 쉽고, 집계 스크립트
++(scripts/aggregate_metrics.py)는 줄 단위로 읽기만 하면 됩니다.
++"""
++import json
++import os
++import threading
++import time
++
++LOG_DIR = "logs"
++REQUESTS_LOG = os.path.join(LOG_DIR, "requests.log")
++DRIFT_LOG = os.path.join(LOG_DIR, "drift_history.log")
++
++_lock = threading.Lock()  # 여러 요청이 동시에 같은 파일에 쓸 때 줄이 섞이지 않게
++
++
++def _append(path: str, record: dict) -> None:
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    line = json.dumps(record, ensure_ascii=False)
++    with _lock, open(path, "a", encoding="utf-8") as f:
++        f.write(line + "\n")
++
++
++def log_request(method: str, path: str, status: int, latency_ms: float) -> None:
++    _append(REQUESTS_LOG, {"ts": time.time(), "method": method, "path": path,
++                           "status": status, "latency_ms": round(latency_ms, 2)})
++
++
++def log_drift(rmse: float, status: str, promoted: bool | None = None) -> None:
++    _append(DRIFT_LOG, {"ts": time.time(), "rmse": round(rmse, 2), "status": status, "promoted": promoted})
++
++
++def read_jsonl(path: str) -> list[dict]:
++    if not os.path.exists(path):
++        return []
++    out = []
++    with open(path, encoding="utf-8") as f:
++        for line in f:
++            line = line.strip()
++            if line:
++                try:
++                    out.append(json.loads(line))
++                except json.JSONDecodeError:
++                    continue  # 쓰는 도중 끊긴 줄은 건너뜀
++    return out
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/monitoring/retrain_trigger.py 2_전력수요_AIOps/serving_app/monitoring/retrain_trigger.py
+--- 1_빈칸정답_HAIC/serving_app/monitoring/retrain_trigger.py	2026-10-01 16:49:42
++++ 2_전력수요_AIOps/serving_app/monitoring/retrain_trigger.py	2026-10-02 09:16:17
+@@ -1,30 +1,33 @@
+ """
+ [Day3] 드리프트 → 자동 재학습  —  serving_app/monitoring/retrain_trigger.py
+-【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
+-   ___ 가 남은 채 실행하면 "name '___' is not defined" 에러가 나며, 그 줄이 채울 곳입니다.
+ 
+ ■ 이 파일이 하는 일 (한 줄 요약)
+-   드리프트가 감지되면 최근 데이터로 모델을 조금 더 학습(fine-tuning)시키고,
++   드리프트가 감지되면 최근 관측 데이터로 모델을 조금 더 학습(fine-tuning)시키고,
+    시험을 통과하면 새 모델을 Production 으로 올립니다. 이 과정을 전부 로그로 남깁니다.
+ 
+ ■ 전체 흐름
+-   드리프트 감지(RMSE > $4) → 경고 로그 → 최근 데이터 가져오기 → fine-tuning
+-     → 시험 통과(RMSE ≤ $4)? ─ 예   → 새 버전을 Production 으로 승격 + 성공 로그
+-                             └ 아니오 → 기존 Production 그대로 유지 (서비스는 멈추지 않음)
++   드리프트 감지(RMSE > 75 GWh) → 경고 로그 → 최근 관측 데이터 가져오기 → fine-tuning
++     → 시험 통과(RMSE ≤ 75 GWh 이고 기존 모델보다 좋음)? ─ 예   → 새 버전 Production 승격 + 성공 로그 + 모델 캐시 교체
++                                                          └ 아니오 → 기존 Production 그대로 유지
+ 
+-■ 확인 방법
+-   python scripts/simulate_drift.py 실행 후, logs/aiops.log (또는 대시보드 "재학습 로그")에
+-   아래 3줄이 순서대로 찍히면 성공입니다.
++■ 확인 방법 — logs/aiops.log (또는 대시보드 "재학습 로그")
+      [WARN] drift detected - triggering retrain
+-     [INFO] retrain triggered (window=last_21_days)
+-     [OK] new_rmse=1.47 - production promoted: HAIC_Predictor v2
+-   ※ 로그 문장은 대시보드가 읽으니 글자를 바꾸지 마세요.
++     [INFO] retrain triggered (window=last_28_days)
++     [OK] new_rmse=... - production promoted: Power_Demand_Predictor v2
+ 
+-■ 이 파일의 빈칸 : [빈칸 9] 데이터 범위   [빈칸 10] 학습 방식   [빈칸 11] 승격 여부
++■ 빈칸 정답 위치 : [빈칸 9] 데이터 범위   [빈칸 10] 학습 방식   [빈칸 11] 승격 여부
++
++🔧 [전력수요 변경] 요약
++   - 재학습 데이터: 업로드된 학습 CSV 의 마지막 행  →  서빙 중 쌓인 관측 데이터(data/observed/observed.csv)의 마지막 행
++     (드리프트는 "새로 들어온 데이터"에서 생기므로, 그 데이터로 적응해야 RMSE 가 내려감)
++   - 21 하드코딩 → WINDOW_SIZE(28) 상수
++   - 승격 성공 시 model_loader.reset_cache() 로 서빙 모델 즉시 교체 (원본은 서버 재시작 전까지 옛 모델 유지)
++   - 게이트 탈락 시에도 [FAIL] 로그를 남김 (원본은 실패 시 로그가 없어 원인 추적이 어려움)
+ """
+ import logging
+ 
+ from serving_app.monitoring.drift_detector import is_drift
++from serving_app.monitoring.request_log import log_drift  # 🆕 [데모 대시보드 추가] 드리프트 이력 기록
+ 
+ # "aiops" 이름의 기록장. main.py 가 이 기록장을 logs/aiops.log 파일에 연결해 두었습니다.
+ logger = logging.getLogger("aiops")
+@@ -34,59 +37,46 @@
+     """
+     받는 것  : 최근 예측 기록 [{"predicted": ..., "actual": ...}, ...]  (predict.py 가 넘겨줌)
+     돌려줄 것:
+-      드리프트 없음 → {"status": "ok"}
+-      재학습 함     → {"status": "retrain_triggered", "promoted": True/False, "rmse": 1.47}
++      드리프트 없음 → {"status": "ok", "rmse": 42.1}
++      재학습 함     → {"status": "retrain_triggered", "promoted": True/False, "rmse": ..., "drift_rmse": ...}
+     """
++    from serving_app.monitoring.drift_detector import compute_rmse, WINDOW_SIZE  # 🔧 [전력수요 변경]
++
++    drift_rmse = compute_rmse(recent_predictions[-WINDOW_SIZE:])  # 🔧 [전력수요 변경] 응답에 현재 RMSE 표시
+     if not is_drift(recent_predictions):
+-        return {"status": "ok"}
++        if recent_predictions:
++            log_drift(drift_rmse, "ok")  # 🆕 [데모 대시보드 추가] 대시보드 "드리프트 점수" 추이용
++        return {"status": "ok", "rmse": drift_rmse}
+ 
+-    logger.warning("[WARN] drift detected - triggering retrain")
++    logger.warning(f"[WARN] drift detected - triggering retrain (rmse={drift_rmse:.1f} GWh)")
+ 
+     # 함수 안에서 import 하는 이유: 파일끼리 서로를 import 하다 꼬이는 문제(순환 import)를 피하려고
+-    #   load_rows          : CSV → 행 목록
+-    #   latest_upload      : 가장 최근 업로드한 CSV 경로
+-    #   SEQ_LEN            : 창문 길이 (20)
+-    #   train_and_register : Day2 — 새 모델을 "처음부터" 학습 (scratch)
+-    #   fine_tune          : Day3 — Production 모델을 "이어받아" 짧게 추가 학습 (warm start)
+     from data.features import load_rows, SEQ_LEN
+-    from data.storage import latest_upload
++    from data.storage import OBSERVED_PATH  # 🔧 [전력수요 변경] latest_upload → OBSERVED_PATH
++    from serving_app import model_loader  # 🔧 [전력수요 변경]
+     from serving_app.train_and_register import fine_tune
+ 
+-    logger.info("[INFO] retrain triggered (window=last_21_days)")
++    logger.info(f"[INFO] retrain triggered (window=last_{WINDOW_SIZE}_days)")  # 🔧 [전력수요 변경] 21 → WINDOW_SIZE
+ 
+-    # ════════════════════════════ [빈칸 9] ════════════════════════════
+-    # 재학습에 쓸 "최근 데이터"만 잘라 오세요.  목표: 최근 21거래일(한 달)의 정답으로 학습
+-    #
+-    #   생각해 볼 질문
+-    #     · 21일치 정답으로 학습하려면, 문제(창문 20일)까지 포함해 몇 행이 필요할까요?
+-    #       (predict.py [빈칸 6]의 그림: 가격 41개 → 예측 21번)
+-    #     · 딱 21행만 자르면 build_sequences 가 만들 수 있는 문제는 몇 개일까요?
+-    #   형태 : 리스트[-(N):] 은 "뒤에서 N개"입니다. ___ 에 N 을 계산식으로 쓰세요. (숫자 41 대신 21 과 상수 이름으로)
+-    # ✅ [빈칸 9 정답] 정답 21일 + 창문(SEQ_LEN=20)일 = 41행
+-    rows = load_rows(latest_upload())[-(21 + SEQ_LEN):]
++    # ✅ [빈칸 9 정답] 정답 21일 + 창문(SEQ_LEN)일  (원본: [-(21 + SEQ_LEN):] = 41행)
++    # 🔧 [전력수요 변경] 21 → WINDOW_SIZE(28), 데이터 원천 latest_upload() → OBSERVED_PATH  → 28 + 14 = 42행
++    rows = load_rows(OBSERVED_PATH)[-(WINDOW_SIZE + SEQ_LEN):]
+ 
+-    # ════════════════════════════ [빈칸 10] ════════════════════════════
+-    # 41행으로 재학습을 실행하세요.  (위 import 설명의 두 함수 중 하나)
+-    #
+-    #   생각해 볼 질문
+-    #     · train_and_register(rows=rows) 도 이 rows 로 실행은 됩니다. 41행으로 LSTM(파라미터 약 1.6만 개)을
+-    #       처음부터 학습하면 어떤 모델이 나올까요?
+-    #     · 3년치로 이미 잘 학습된 Production 모델을 활용하는 방법은 없을까요?
+-    #   결과 : {"run_id": "...", "rmse": 1.47, "promoted": True, "version": "2"}  (떨어지면 "version" 없음)
+-    # ✅ [빈칸 10 정답] Production 가중치를 이어받는 fine_tune (41행으로 스크래치 학습은 불안정)
++    # ✅ [빈칸 10 정답] Production 가중치를 이어받는 fine_tune (42행으로 스크래치 학습은 불안정)
+     result = fine_tune(rows)
+ 
+-    # ════════════════════════════ [빈칸 11] ════════════════════════════
+-    # 새 모델이 "실제로 Production 이 되었을 때만" 성공 로그를 남기도록 조건을 채우세요.
+-    #
+-    #   생각해 볼 질문
+-    #     · 재학습이 "실행됐다"와 "새 모델이 배포됐다"는 같은 뜻일까요?
+-    #     · 시험(RMSE ≤ $4)에 떨어진 새 모델은 어떻게 되고, 서비스는 어떤 모델이 계속 맡나요?
+-    #       (train_and_register.py 의 _register_if_gate_passed 참고)
+     # ✅ [빈칸 11 정답] 게이트를 통과해 실제로 Production 이 됐을 때만 성공 로그
++    log_drift(drift_rmse, "retrain_triggered", result["promoted"])  # 🆕 [데모 대시보드 추가]
+     if result["promoted"]:
++        model_loader.reset_cache()  # 🔧 [전력수요 변경] 다음 요청부터 새 Production 으로 서빙
+         logger.info(
+-            f"[OK] new_rmse={result['rmse']:.2f} - production promoted: HAIC_Predictor v{result['version']}"
++            f"[OK] new_rmse={result['rmse']:.2f} - production promoted: {model_loader.MODEL_NAME} v{result['version']}"
+         )
+-        return {"status": "retrain_triggered", "promoted": True, "rmse": result["rmse"]}
+-    return {"status": "retrain_triggered", "promoted": False, "rmse": result["rmse"]}
++        return {"status": "retrain_triggered", "promoted": True, "rmse": result["rmse"],
++                "drift_rmse": drift_rmse, "champion_rmse": result["champion_rmse"]}
++    # 🔧 [전력수요 변경] (신규) 탈락 로그
++    logger.info(
++        f"[FAIL] new_rmse={result['rmse']:.2f} (champion={result['champion_rmse']:.2f}) - gate not passed, keep current production"
++    )
++    return {"status": "retrain_triggered", "promoted": False, "rmse": result["rmse"],
++            "drift_rmse": drift_rmse, "champion_rmse": result["champion_rmse"]}
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/routers/data.py 2_전력수요_AIOps/serving_app/routers/data.py
+--- 1_빈칸정답_HAIC/serving_app/routers/data.py	2026-09-29 13:52:58
++++ 2_전력수요_AIOps/serving_app/routers/data.py	2026-10-01 16:58:50
+@@ -1,6 +1,9 @@
+ """
+-HAIC 가상 데이터 업로드 - data/generate_haic_data.py로 자동 생성하던 방식을 대체합니다.
++전력수요 데이터 업로드 - data/generate_haic_data.py로 자동 생성하던 방식을 대체합니다.
+ 
++🔧 [전력수요 변경] 필수 컬럼 Date/Close/Volume → Date/Demand/Temp/Holiday, 파일명 haic_ → power_,
++   UTF-8-SIG(BOM) 허용, /data/status 를 수요·기온 요약으로, 대시보드용 GET /data/sample-batch 추가
++
+ /data 폴더는 이 라우터로 업로드된 CSV만 쌓이는 곳입니다(data/uploads/). 여러 번
+ 업로드하면 계속 쌓이고, 학습(train_and_register.py, fine_tune 등)은 항상 가장
+ 최근 파일 하나를 사용합니다(data/storage.py의 latest_upload()).
+@@ -14,13 +17,14 @@
+ 
+ from fastapi import APIRouter, File, HTTPException, UploadFile
+ 
++from data.drift_scenarios import SCENARIOS, make_batch  # 🔧 [전력수요 변경]
+ from data.features import SEQ_LEN, load_rows
+ from data.storage import UPLOAD_DIR, latest_upload
+ from serving_app.monitoring.drift_detector import WINDOW_SIZE
+ 
+ router = APIRouter(prefix="/data")
+ 
+-REQUIRED_COLUMNS = {"Date", "Close", "Volume"}
++REQUIRED_COLUMNS = {"Date", "Demand", "Temp", "Holiday"}  # 🔧 [전력수요 변경]
+ MIN_ROWS = SEQ_LEN + WINDOW_SIZE  # 시퀀스 구성 + 드리프트 판정 윈도우에 필요한 최소 행 수
+ 
+ 
+@@ -28,7 +32,7 @@
+ async def upload(file: UploadFile = File(...)):
+     raw = await file.read()
+     try:
+-        text = raw.decode("utf-8")
++        text = raw.decode("utf-8-sig")  # 🔧 [전력수요 변경] 엑셀에서 저장한 BOM 포함 CSV 도 허용
+     except UnicodeDecodeError:
+         raise HTTPException(400, "UTF-8로 인코딩된 CSV 파일만 업로드할 수 있습니다.")
+ 
+@@ -40,7 +44,7 @@
+         raise HTTPException(400, f"최소 {MIN_ROWS}행 이상의 데이터가 필요합니다.")
+ 
+     os.makedirs(UPLOAD_DIR, exist_ok=True)
+-    dest = os.path.join(UPLOAD_DIR, f"haic_{int(time.time())}.csv")
++    dest = os.path.join(UPLOAD_DIR, f"power_{int(time.time())}.csv")  # 🔧 [전력수요 변경] haic_ → power_
+     with open(dest, "w", encoding="utf-8", newline="") as f:
+         f.write(text)
+ 
+@@ -55,13 +59,28 @@
+         return {"exists": False}
+ 
+     rows = load_rows(path)
+-    closes = [r["Close"] for r in rows]
++    demands = [r["Demand"] for r in rows]  # 🔧 [전력수요 변경] 종가 → 수요·기온 요약
+     return {
+         "exists": True,
+         "filename": os.path.basename(path),
+         "rows": len(rows),
+         "start_date": rows[0]["Date"],
+         "end_date": rows[-1]["Date"],
+-        "min_close": min(closes),
+-        "max_close": max(closes),
++        "min_demand_gwh": min(demands),
++        "max_demand_gwh": max(demands),
++        "min_temp": min(r["Temp"] for r in rows),
++        "max_temp": max(r["Temp"] for r in rows),
+     }
++
++
++# 🔧 [전력수요 변경] (신규) 대시보드의 "정상/드리프트 배치 전송" 버튼이 쓰는 배치 생성 API.
++#    원본 대시보드는 브라우저에서 랜덤워크 가격을 만들었지만, 전력수요는 실제 2025년 기록이 필요해서
++#    서버가 업로드된 CSV 에서 잘라 준다. (scripts/simulate_drift.py 와 같은 data/drift_scenarios.py 사용)
++@router.get("/sample-batch")
++def sample_batch(kind: str = "normal", scenario: str = "ramp"):
++    if kind not in ("normal", "drift") or scenario not in SCENARIOS:
++        raise HTTPException(400, f"kind=normal|drift, scenario={'|'.join(SCENARIOS)}")
++    try:
++        return {"records": make_batch(kind=kind, scenario=scenario)}
++    except FileNotFoundError as e:
++        raise HTTPException(400, str(e))
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/routers/metrics.py 2_전력수요_AIOps/serving_app/routers/metrics.py
+--- 1_빈칸정답_HAIC/serving_app/routers/metrics.py	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/serving_app/routers/metrics.py	2026-10-02 09:20:03
+@@ -0,0 +1,180 @@
++"""
++🆕 [데모 대시보드 추가] (신규 파일) 운영 대시보드용 조회 API.
++
++교수님 데모 대시보드(4탭: Dashboard / Simulation / Datasets / System)가 보여 주던 값을
++이미 존재하는 데이터(로그 파일, MLflow Registry)를 읽어서만 만듭니다. 가짜 값은 만들지 않습니다.
++
++  GET /metrics/summary?window=5m|1h|6h|24h  운영 지표 요약 5칸 (요청 수·응답시간·성공률·모델 RMSE·드리프트 점수)
++  GET /metrics/versions                     재학습 이력 (MLflow Registry 의 Power_Demand_Predictor 전체 버전)
++  GET /metrics/current-model                현재 운영(Production) 모델 카드
++  GET /metrics/alerts                       최근 알람 (logs/aiops.log 의 [WARN]/[INFO]/[OK]/[FAIL] 줄)
++  GET /metrics/system                       System 탭 (로딩 모드, 모델 소스, 라이브러리 버전, 데이터·로그 파일 상태)
++"""
++import os
++import platform
++import re
++import time
++from datetime import datetime
++from urllib.parse import unquote
++
++import mlflow  # 서버 시작 때 미리 import — 대시보드가 여러 API 를 동시에 부를 때 각 스레드가 mlflow 를
++from mlflow.tracking import MlflowClient  # 처음 import 하면서 꼬이는 문제(순환 import 오류)를 막기 위함
++from fastapi import APIRouter, HTTPException
++
++from data.storage import OBSERVED_PATH, UPLOAD_DIR
++from scripts.aggregate_metrics import WINDOWS, aggregate
++from serving_app import model_loader
++from serving_app.monitoring.drift_detector import RMSE_THRESHOLD, WINDOW_SIZE
++from serving_app.monitoring.request_log import DRIFT_LOG, LOG_DIR, read_jsonl
++
++router = APIRouter(prefix="/metrics")
++_STARTED_AT = time.time()
++
++# MLflow 조회는 수백 ms 걸릴 수 있어, 대시보드가 5초마다 새로고침해도 서버가 느려지지 않게 짧게 캐시
++_CACHE_SEC = 3.0
++_versions_cache: dict = {"t": 0.0, "data": None}
++
++
++def _versions() -> list[dict]:
++    if _versions_cache["data"] is not None and time.time() - _versions_cache["t"] < _CACHE_SEC:
++        return _versions_cache["data"]
++    client = MlflowClient()
++    try:
++        mvs = client.search_model_versions(f"name='{model_loader.MODEL_NAME}'")
++    except Exception:
++        mvs = []
++    out = []
++    for v in mvs:
++        params, metrics = {}, {}
++        if v.run_id:
++            try:
++                run = client.get_run(v.run_id)
++                params, metrics = run.data.params, run.data.metrics
++            except Exception:
++                pass
++        out.append({
++            "version": int(v.version),
++            "registered_at": v.creation_timestamp / 1000,
++            "mode": params.get("mode", "?"),  # scratch(Day2 base 학습) | fine-tune(Day3 재학습)
++            "rmse": metrics.get("rmse"),
++            "mape": metrics.get("mape"),
++            "champion_rmse": metrics.get("champion_rmse"),
++            "n_rows": params.get("n_rows") or params.get("n_train"),
++            "stage": v.current_stage or "None",
++            "run_id": v.run_id,
++        })
++    out.sort(key=lambda x: x["version"], reverse=True)
++    _versions_cache.update(t=time.time(), data=out)
++    return out
++
++
++@router.get("/summary")
++def summary(window: str = "5m"):
++    if window not in WINDOWS:
++        raise HTTPException(400, f"window 는 {list(WINDOWS)} 중 하나")
++    svc = aggregate(window)
++
++    versions = _versions()
++    prod = next((v for v in versions if v["stage"] == "Production"), None)
++    # 모델 성능 미니 그래프: 등록 버전 순서대로 RMSE (오래된 → 최신, 최근 12개)
++    rmse_trend = [{"version": v["version"], "rmse": v["rmse"], "mode": v["mode"]}
++                  for v in sorted(versions, key=lambda x: x["version"]) if v["rmse"] is not None][-12:]
++
++    # 드리프트 점수: 지금 메모리에 쌓인 최근 28건 예측의 RMSE (predict.py 의 recent_predictions)
++    from serving_app.monitoring.drift_detector import compute_rmse
++    from serving_app.routers.predict import recent_predictions
++
++    drift_now = compute_rmse(recent_predictions[-WINDOW_SIZE:]) if recent_predictions else None
++    drift_hist = read_jsonl(DRIFT_LOG)[-12:]
++    return {
++        "window": window,
++        "service": svc,
++        "model": {"production_version": prod["version"] if prod else None,
++                  "rmse": prod["rmse"] if prod else None, "mode": prod["mode"] if prod else None,
++                  "trend": rmse_trend},
++        "drift": {"score": drift_now, "threshold": RMSE_THRESHOLD, "window_size": WINDOW_SIZE,
++                  "n_recent": len(recent_predictions), "history": drift_hist},
++    }
++
++
++@router.get("/versions")
++def versions():
++    return _versions()
++
++
++@router.get("/current-model")
++def current_model():
++    versions = _versions()
++    prod = next((v for v in versions if v["stage"] == "Production"), None)
++    cached = model_loader._model_cache
++    return {
++        "name": model_loader.MODEL_NAME,
++        "production": prod,
++        "serving_version": cached.version if cached else None,  # 서버 메모리에 올라와 있는 모델
++        "model_loaded": cached is not None,
++        "gate_rmse": RMSE_THRESHOLD,
++        "healthy": prod is not None or os.getenv("MODEL_SOURCE", "local") != "mlflow",
++    }
++
++
++_ALERT_RE = re.compile(r"^(\S+ \S+) \[(\w+)\] (.*)$")
++
++
++@router.get("/alerts")
++def alerts(limit: int = 30):
++    path = os.path.join(LOG_DIR, "aiops.log")
++    if not os.path.exists(path):
++        return []
++    with open(path, encoding="utf-8") as f:
++        lines = f.read().splitlines()
++    out = []
++    for line in reversed(lines):
++        m = _ALERT_RE.match(line)
++        if not m:
++            continue
++        ts_str, level, msg = m.groups()
++        try:
++            ts = datetime.strptime(ts_str.split(",")[0], "%Y-%m-%d %H:%M:%S").timestamp()
++        except ValueError:
++            ts = None
++        kind = "ok" if "[OK]" in msg else "fail" if "[FAIL]" in msg else "warn" if level == "WARNING" else "info"
++        out.append({"ts": ts, "level": kind, "message": msg})
++        if len(out) >= limit:
++            break
++    return out
++
++
++@router.get("/system")
++def system():
++    import fastapi
++    import numpy
++
++    def _files(d):
++        if not os.path.isdir(d):
++            return []
++        return [{"name": n, "size": os.path.getsize(os.path.join(d, n))}
++                for n in sorted(os.listdir(d)) if os.path.isfile(os.path.join(d, n))]
++
++    from importlib.metadata import version as pkg_version
++
++    try:
++        tf_ver = pkg_version("tensorflow")  # import 하지 않고 설치 정보만 읽음 (tensorflow import 는 수 초 걸림)
++    except Exception:
++        tf_ver = "?"
++    observed_rows = 0
++    if os.path.exists(OBSERVED_PATH):
++        with open(OBSERVED_PATH, encoding="utf-8") as f:
++            observed_rows = max(0, sum(1 for _ in f) - 1)
++    return {
++        "loading_mode": os.getenv("LOADING_MODE", "lazy"),
++        "model_source": os.getenv("MODEL_SOURCE", "local"),
++        "mlflow_tracking_uri": unquote(mlflow.get_tracking_uri()),  # 한글 경로가 %EC.. 로 보이지 않게
++        "uptime_sec": round(time.time() - _STARTED_AT),
++        "python": platform.python_version(),
++        "versions": {"fastapi": fastapi.__version__, "mlflow": mlflow.__version__,
++                     "tensorflow": tf_ver, "numpy": numpy.__version__},
++        "uploads": _files(UPLOAD_DIR),
++        "observed_rows": observed_rows,
++        "logs": _files(LOG_DIR),
++        "drift_rule": {"threshold_gwh": RMSE_THRESHOLD, "window_days": WINDOW_SIZE},
++    }
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/routers/predict.py 2_전력수요_AIOps/serving_app/routers/predict.py
+--- 1_빈칸정답_HAIC/serving_app/routers/predict.py	2026-10-01 16:49:42
++++ 2_전력수요_AIOps/serving_app/routers/predict.py	2026-10-01 16:56:01
+@@ -1,99 +1,98 @@
+ """
+ [Day1 → Day3] 예측 API  —  serving_app/routers/predict.py
+-【실습용】 ___ (밑줄 3개)만 채우세요. 채울 곳은 [빈칸 N] 으로 표시되어 있습니다.
+-   ___ 가 남은 채 실행하면 "name '___' is not defined" 에러가 나며, 그 줄이 채울 곳입니다.
+ 
+ ■ 이 파일이 하는 일 (한 줄 요약)
+    외부 요청을 받아 모델에게 전달하고, 결과를 돌려주는 "창구"입니다.
+    계산은 직접 하지 않고, 모델(model_loader)과 감시 도구(retrain_trigger)에게 맡깁니다.
+ 
+ ■ 엔드포인트
+-   [Day1] POST /predict             : 20일치 데이터 → 다음날 종가 1개   (완성 — 읽고 흐름만 이해하세요)
+-   [Day3] POST /predict/batch-test  : 긴 가격 목록 → 여러 번 예측 → 드리프트 검사
++   [Day1] POST /predict             : 14일치 기록 + 예측일 정보 → 다음날 전력수요 1개
++   [Day3] POST /predict/batch-test  : 긴 일별 기록 → 여러 번 예측 → 드리프트 검사
+ 
+-■ 이 파일의 빈칸 : [빈칸 6]  (batch_test 의 슬라이딩 윈도우)
++■ 빈칸 정답 위치 : [빈칸 6]  (batch_test 의 슬라이딩 윈도우)
++
++🔧 [전력수요 변경] 요약
++   - 요청 형식: 종가 시퀀스/종가 목록 → 일별 기록(날짜·수요·기온·공휴일) + 예측 대상일
++   - batch_test 가 들어온 실제 관측값을 data/observed/observed.csv 에 저장 (재학습 데이터 원천)
++   - 최근 기록 유지 길이 21 하드코딩 → drift_detector.WINDOW_SIZE(28) 상수 사용
+ """
+ from fastapi import APIRouter
+ 
+-from data.features import SEQ_LEN  # = 20
++from data.features import SEQ_LEN  # = 14
++from data.storage import append_observed  # 🔧 [전력수요 변경]
+ from serving_app import model_loader
+-from serving_app.schemas import PredictRequest, PredictResponse, BatchTestRequest, BatchTestResponse
++from serving_app.monitoring.drift_detector import WINDOW_SIZE  # 🔧 [전력수요 변경]
+ from serving_app.monitoring.retrain_trigger import check_and_trigger
++from serving_app.schemas import PredictRequest, PredictResponse, BatchTestRequest, BatchTestResponse
+ 
+ router = APIRouter()
+ 
+-# (Day3) 최근 예측 기록을 모아 두는 목록.  예: [{"predicted": 161.2, "actual": 163.0}, ...]
+-#        드리프트 판단은 "최근 21건"(drift_detector.py 의 WINDOW_SIZE)만 보므로 21개까지만 유지합니다.
++# (Day3) 최근 예측 기록을 모아 두는 목록.  예: [{"predicted": 1612.3, "actual": 1598.0}, ...]
++#        드리프트 판단은 "최근 28건"(drift_detector.py 의 WINDOW_SIZE)만 보므로 28개까지만 유지합니다.
+ recent_predictions: list[dict] = []
+ 
+-# (Day3) 시뮬레이션은 종가만 보내므로, 거래량은 이 값으로 고정해서 채웁니다.
+-SIMULATED_VOLUME = 1_200_000
+ 
++# 🔧 [전력수요 변경] (신규) API 요청(pydantic, 소문자 키) → features.py 가 쓰는 행 dict(대문자 키)
++def _to_row(r) -> dict:
++    row = {"Date": r.date.isoformat(), "Temp": r.temp, "Holiday": r.holiday}
++    if hasattr(r, "demand"):
++        row["Demand"] = r.demand
++    return row
+ 
++
++# 🔧 [전력수요 변경] SIMULATED_VOLUME(거래량 고정값) 삭제 — 시뮬레이션도 실제 기온·공휴일을 함께 보냄
++
++
+ @router.post("/predict", response_model=PredictResponse)
+ def predict(req: PredictRequest):
+     """
+-    [Day1] 다음날 종가 예측  (완성)
+-    받는 것  : {"sequence": [{"close": 160.0, "volume": 1200000}, ... 20개]}
+-               20개가 아니면 schemas.py 가 알아서 422 에러를 돌려줍니다.
+-    돌려줄 것: {"predicted_close": 161.37, "model_version": "v1-local"}
+-
+-    흐름: 모델 가져오기(get_model) → dict 목록으로 변환 → predict_one → 응답 포장
+-    핵심 계산은 모두 model_loader.predict_one() 안에 있습니다. ([빈칸 2], [빈칸 3])
++    [Day1] 다음날 전력수요 예측
++    받는 것  : {"history": [{"date": "2025-01-01", "demand": 1500.2, "temp": -2.1, "holiday": 1}, ... 14개],
++                "target":  {"date": "2025-01-15", "temp": -3.0, "holiday": 0}}
++    돌려줄 것: {"target_date": "2025-01-15", "predicted_demand_gwh": 1712.4, "model_version": "production-v1"}
+     """
+     model = model_loader.get_model()
+-    sequence = [p.model_dump() for p in req.sequence]
+-    predicted_close = model.predict_one(sequence)
+-    return PredictResponse(predicted_close=round(predicted_close, 2), model_version=model.version)
++    history = [_to_row(r) for r in req.history]
++    target = _to_row(req.target)
++    predicted = model.predict_one(history, target)
++    return PredictResponse(
++        target_date=req.target.date, predicted_demand_gwh=round(predicted, 1), model_version=model.version
++    )
+ 
+ 
+ @router.post("/predict/batch-test", response_model=BatchTestResponse)
+ def batch_test(req: BatchTestRequest):
+     """
+     [Day3] 드리프트 시뮬레이션
+-    받는 것  : {"prices": [165.0, 166.2, ... 41개]}   (scripts/simulate_drift.py 가 보냄)
+-    돌려줄 것: {"predictions": [예측값 21개], "drift_check": {"status": "ok"} 또는 재학습 결과}
++    받는 것  : {"records": [{"date":..., "demand":..., "temp":..., "holiday":...}, ... 42개]}
++    돌려줄 것: {"predictions": [예측 28개], "actuals": [실제 28개], "drift_check": {...}}
+ 
+-    ■ 핵심 아이디어: 슬라이딩 윈도우 (20칸짜리 창문을 한 칸씩 밀기)
+-      가격 41개가 들어오면, 20개씩 잘라 "그다음 날"을 예측하고 실제 값과 비교합니다.
+-
+-        i=0 : [p0  ~ p19] → 예측   vs  실제 p20
+-        i=1 : [p1  ~ p20] → 예측   vs  실제 p21
++    ■ 슬라이딩 윈도우 (14칸짜리 창문을 한 칸씩 밀기)
++        i=0 : [d0  ~ d13] + d14 의 기온·휴일 → 예측   vs  실제 d14 수요
++        i=1 : [d1  ~ d14] + d15 의 기온·휴일 → 예측   vs  실제 d15 수요
+         ...
+-        i=20: [p20 ~ p39] → 예측   vs  실제 p40
+-        → 총 41 - 20 = 21번 예측 = 드리프트 판단에 필요한 21건이 딱 채워집니다.
+-
+-    확인 방법
+-      python scripts/simulate_drift.py
+-        [normal]          drift_check = {'status': 'ok'}
+-        [drift_injection] drift_check = {'status': 'retrain_triggered', 'promoted': True, ...}
+-      /docs 에서 직접 호출할 때는 predictions 가 (가격 개수 - 20)개인지 확인하세요.
++        → 총 42 - 14 = 28번 예측 = 드리프트 판단에 필요한 28건이 딱 채워집니다.
+     """
+     model = model_loader.get_model()
+     predictions: list[float] = []
++    actuals: list[float] = []
+ 
+-    prices = req.prices
+-    for i in range(len(prices) - SEQ_LEN):
+-        # ════════════════════════════ [빈칸 6] ════════════════════════════
+-        # i번째 창문(window)의 시작·끝 위치와, 그 창문 바로 다음 날(actual)의 위치를 채우세요. (i 와 SEQ_LEN 으로)
+-        #   (위 docstring 의 그림에서 i=0 일 때 무엇이 창문이고 무엇이 실제 값인지 먼저 확인)
+-        #
+-        #   생각해 볼 질문
+-        #     · 파이썬 슬라이싱 prices[a:b] 는 b 를 포함하나요?
+-        #     · 실제 값을 한 칸 앞(창문의 마지막 날)으로 잡으면, 모델은 무엇을 "맞힌" 셈이 될까요?
+-        #     · 반대로 창문을 한 칸 더 길게 잡아서 실제 값이 창문 안에 들어가면 RMSE는 어떻게 될까요?
++    rows = [_to_row(r) for r in req.records]  # 🔧 [전력수요 변경] prices → rows
++    append_observed(rows)  # 🔧 [전력수요 변경] 관측 데이터 저장 (재학습 때 사용)
++
++    for i in range(len(rows) - SEQ_LEN):
+         # ✅ [빈칸 6 정답] 창문 = i ~ i+SEQ_LEN-1 (끝 인덱스는 포함 안 됨), 실제값 = 창문 바로 다음 날
+-        window = prices[i : i + SEQ_LEN]
+-        sequence = [{"close": p, "volume": SIMULATED_VOLUME} for p in window]
+-        pred = model.predict_one(sequence)
+-        actual = prices[i + SEQ_LEN]
++        window = rows[i : i + SEQ_LEN]
++        target = rows[i + SEQ_LEN]  # 🔧 [전력수요 변경] 다음날의 기온·휴일은 예측 입력으로, 수요는 정답으로
++        pred = model.predict_one(window, {k: target[k] for k in ("Date", "Temp", "Holiday")})
++        actual = target["Demand"]
+         predictions.append(pred)
++        actuals.append(actual)
+         recent_predictions.append({"predicted": pred, "actual": actual})
+ 
+-    # 최근 21건만 남기기 — 오래된 기록까지 섞이면 "지금" 상태를 판단할 수 없습니다.
+-    # (recent_predictions = ... 로 쓰면 함수 안의 새 변수가 되므로, [:] 로 목록 내용을 바꿉니다)
+-    recent_predictions[:] = recent_predictions[-21:]  # WINDOW_SIZE 유지
++    # 최근 WINDOW_SIZE 건만 남기기 — 오래된 기록까지 섞이면 "지금" 상태를 판단할 수 없습니다.
++    recent_predictions[:] = recent_predictions[-WINDOW_SIZE:]  # 🔧 [전력수요 변경] -21 하드코딩 → WINDOW_SIZE
+ 
+     # 드리프트 판단·재학습은 retrain_trigger.py 가 합니다. 여기서는 넘겨주기만!
+     drift_check = check_and_trigger(recent_predictions)
+-    return BatchTestResponse(predictions=predictions, drift_check=drift_check)
++    return BatchTestResponse(predictions=predictions, actuals=actuals, drift_check=drift_check)
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/schemas.py 2_전력수요_AIOps/serving_app/schemas.py
+--- 1_빈칸정답_HAIC/serving_app/schemas.py	2026-09-16 20:20:55
++++ 2_전력수요_AIOps/serving_app/schemas.py	2026-10-01 16:53:55
+@@ -1,43 +1,52 @@
+ """
+ Day1: FastAPI 요청/응답 Pydantic 스키마.
+ 
+-LSTM은 한 시점의 값이 아니라 최근 SEQ_LEN(20)거래일의 흐름을 입력받아야 하므로,
+-/predict는 단일 행이 아니라 "20거래일치 시퀀스"를 요청 본문으로 받습니다.
+-이 검증 로직은 Day2 "데이터/모델 검증" 실습에서 다루는 것과 같은 종류입니다 -
+-서빙 시점 입력 검증이 학습 시점 피처(data/features.py)와 어긋나지 않도록
+-길이(SEQ_LEN)와 값 범위(gt=0, ge=0)를 스키마 단에서 강제합니다.
++🔧 [전력수요 변경] 원본은 "최근 20거래일 (종가, 거래량)" 시퀀스를 받았습니다.
++   전력수요는 과거 SEQ_LEN(14)일의 (날짜, 수요, 기온, 공휴일) + 예측 대상일의 (날짜, 예보 기온, 공휴일)을 받습니다.
++   요일은 날짜에서 서버가 계산하므로 보내지 않아도 됩니다.
+ """
++from datetime import date as Date
++
+ from pydantic import BaseModel, Field
+ 
+ from data.features import SEQ_LEN
+ 
+ 
+-class DailyPoint(BaseModel):
+-    close: float = Field(..., gt=0, description="해당 거래일 종가")
+-    volume: int = Field(..., ge=0, description="해당 거래일 거래량")
++# 🔧 [전력수요 변경] DailyPoint(close, volume) → DayRecord / TargetDay
++class TargetDay(BaseModel):
++    date: Date = Field(..., description="날짜 (YYYY-MM-DD)")
++    temp: float = Field(..., ge=-40, le=50, description="전국 인구가중 일평균기온(℃). 예측 대상일은 기상 예보값")
++    holiday: int = Field(0, ge=0, le=1, description="공휴일·명절·대체공휴일이면 1 (주말은 날짜로 자동 판단)")
+ 
+ 
++class DayRecord(TargetDay):
++    demand: float = Field(..., gt=0, description="일 전력수요 (GWh = 24개 시간별 수요 MW 합 / 1000)")
++
++
+ class PredictRequest(BaseModel):
+-    sequence: list[DailyPoint] = Field(
++    history: list[DayRecord] = Field(
+         ...,
+         min_length=SEQ_LEN,
+         max_length=SEQ_LEN,
+-        description=f"가장 오래된 날 -> 가장 최근 날 순서의 최근 {SEQ_LEN}거래일 시퀀스",
++        description=f"가장 오래된 날 -> 가장 최근 날 순서의 최근 {SEQ_LEN}일 기록",
+     )
++    target: TargetDay = Field(..., description="예측할 날(history 마지막 날의 다음 날)")
+ 
+ 
+ class PredictResponse(BaseModel):
+-    predicted_close: float
++    target_date: Date
++    predicted_demand_gwh: float
+     model_version: str
+ 
+ 
+ class BatchTestRequest(BaseModel):
+     # Day3 드리프트 시뮬레이션에서 사용 (scripts/simulate_drift.py 참고)
+-    # SEQ_LEN + N 개의 연속된 종가를 보내면, 서버가 내부적으로 슬라이딩 윈도우로 잘라
+-    # 여러 건을 연속 예측한다. (거래량은 시뮬레이션이므로 고정값을 사용)
+-    prices: list[float] = Field(..., min_length=SEQ_LEN + 1)
++    # 🔧 [전력수요 변경] prices(종가 목록) → records(일별 관측 기록 목록)
++    # SEQ_LEN + N 개의 연속된 날을 보내면, 서버가 슬라이딩 윈도우로 잘라 N건을 연속 예측한다.
++    records: list[DayRecord] = Field(..., min_length=SEQ_LEN + 1)
+ 
+ 
+ class BatchTestResponse(BaseModel):
+     predictions: list[float]
++    actuals: list[float]  # 🔧 [전력수요 변경] 대시보드가 RMSE를 다시 계산할 수 있도록 실제값도 돌려줌
+     drift_check: dict
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/static/basic.html 2_전력수요_AIOps/serving_app/static/basic.html
+--- 1_빈칸정답_HAIC/serving_app/static/basic.html	1970-01-01 09:00:00
++++ 2_전력수요_AIOps/serving_app/static/basic.html	2026-10-02 09:19:12
+@@ -0,0 +1,411 @@
++<!DOCTYPE html>
++<!-- ✏️ [데모 대시보드 수정] 이 파일은 이전 static/index.html(1장짜리 실습 대시보드)을 내용 변경 없이 이름만 바꿔 보존한 것입니다.
++     새 운영 대시보드는 static/index.html (교수님 데모 4탭 구성). 이 화면 주소: /basic.html -->
++<html lang="ko">
++<head>
++<meta charset="UTF-8" />
++<meta name="viewport" content="width=device-width, initial-scale=1.0" />
++<!-- 🔧 [전력수요 변경] 이 파일에서 바뀐 곳은 모두 "🔧 [전력수요 변경]" 주석으로 표시했습니다 -->
++<title>AIOps · 전력수요 재학습 파이프라인</title>
++<link rel="icon" type="image/x-icon" href="/favicon.ico" />
++<style>
++  :root {
++    --bg: #0a0c10;
++    --panel: #12151c;
++    --panel-2: #171b25;
++    --border: #262b38;
++    --text: #eef1f7;
++    --muted: #9aa4b8;
++    --faint: #5b6478;
++    --accent: #6c8dff;
++    --accent-soft: rgba(108, 141, 255, 0.16);
++    --ok: #3ddc97;
++    --ok-soft: rgba(61, 220, 151, 0.14);
++    --warn: #f5b64c;
++    --warn-soft: rgba(245, 182, 76, 0.14);
++    --err: #ff6b6b;
++    --err-soft: rgba(255, 107, 107, 0.14);
++    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
++    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard, sans-serif;
++  }
++  * { box-sizing: border-box; }
++  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
++
++  .topnav {
++    display: flex; align-items: center; gap: 14px; justify-content: space-between;
++    background: var(--panel); border-bottom: 1px solid var(--border);
++    padding: 0 20px; height: 60px; position: sticky; top: 0; z-index: 10;
++  }
++  .brand { display: flex; align-items: center; gap: 10px; }
++  .brand-mark {
++    width: 34px; height: 34px; border-radius: 9px;
++    background: linear-gradient(135deg, var(--accent), #a9bdff);
++    display: flex; align-items: center; justify-content: center; color: #0a0c10;
++    flex-shrink: 0;
++  }
++  .brand-text .title { font-weight: 700; font-size: 1.02rem; line-height: 1.2; }
++  .brand-text .subtitle { font-size: 0.72rem; color: var(--muted); }
++  .nav-right { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
++  .pill {
++    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px;
++    font-size: 0.74rem; font-weight: 700;
++  }
++  .pill.ok { background: var(--ok-soft); color: var(--ok); }
++  .pill.warn { background: var(--warn-soft); color: var(--warn); }
++  .pill.err { background: var(--err-soft); color: var(--err); }
++  .pill.neutral { background: var(--panel-2); color: var(--muted); }
++  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
++
++  .page { max-width: 980px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
++
++  .card {
++    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
++    padding: 18px 20px;
++  }
++  .section-head { margin-bottom: 14px; }
++  .section-head h2 { margin: 0 0 3px; font-size: 1.05rem; }
++  .section-head p { margin: 0; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
++  .section-head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
++
++  .btn { border: none; border-radius: 9px; padding: 9px 14px; font-size: 0.83rem; font-weight: 700; cursor: pointer; }
++  .btn.primary { background: var(--accent); color: #0a0c10; }
++  .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
++  .btn.danger { background: var(--err); color: #1a0a0a; }
++  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
++  .btn-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
++
++  /* ---------- Upload ---------- */
++  .upload-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
++  input[type="file"] {
++    color: var(--muted); font-size: 0.82rem; max-width: 100%;
++  }
++
++  /* ---------- Pipeline ---------- */
++  .pipeline-meta { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
++  .pipeline-track { display: flex; align-items: stretch; overflow-x: auto; padding: 2px 2px 4px; gap: 0; }
++  .pipe-stage { flex: 1; min-width: 110px; text-align: center; padding: 10px 10px; border-left: 1px solid var(--border); }
++  .pipe-stage:first-child { border-left: none; }
++  .pipe-title { font-size: 0.82rem; font-weight: 700; color: var(--faint); }
++  .pipe-stage.ok .pipe-title, .pipe-stage.warn .pipe-title { color: var(--text); }
++  .pipe-desc { font-size: 0.7rem; color: var(--muted); margin: 2px 0 6px; line-height: 1.4; }
++  .pipe-status { font-size: 0.7rem; font-weight: 700; }
++  .pipe-stage.ok .pipe-status { color: var(--ok); }
++  .pipe-stage.warn .pipe-status { color: var(--warn); }
++  .pipe-stage.idle .pipe-status { color: var(--faint); }
++
++  /* ---------- Tables ---------- */
++  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
++  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 0.74rem; text-transform: uppercase;
++       letter-spacing: 0.03em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
++  td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
++  tr:last-child td { border-bottom: none; }
++  .table-empty { color: var(--faint); font-size: 0.82rem; padding: 20px 4px; text-align: center; }
++
++  .result-box {
++    margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: var(--panel-2);
++    border: 1px solid var(--border); font-family: var(--mono); font-size: 0.8rem;
++    white-space: pre-wrap; word-break: break-word; display: none; max-height: 260px; overflow-y: auto;
++  }
++  .result-box.show { display: block; }
++
++  code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
++  footer { color: var(--faint); font-size: 0.76rem; text-align: center; margin: 26px 0 10px; }
++</style>
++</head>
++<body>
++
++<div class="topnav">
++  <div class="brand">
++    <div class="brand-mark">
++      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M2 12h4l2-7 4 14 3-10 2 3h5" stroke="#0a0c10" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
++    </div>
++    <div class="brand-text">
++      <div class="title">AIOps · 전력수요 예측</div><!-- 🔧 [전력수요 변경] -->
++      <div class="subtitle">드리프트 감지 기반 재학습 파이프라인</div>
++    </div>
++  </div>
++  <div class="nav-right">
++    <span class="pill neutral">MODEL_SOURCE=mlflow 기준</span>
++  </div>
++</div>
++
++<div class="page">
++
++  <!-- ================= 데이터 업로드 ================= -->
++  <div class="card">
++    <div class="section-head">
++      <!-- 🔧 [전력수요 변경] 업로드 안내: 예시 파일·컬럼·최소 행 수 -->
++      <h2>전력수요 데이터 업로드</h2>
++      <p>
++        <code>data/uploads/</code>는 여기서 업로드한 CSV만 쌓이는 곳입니다. 학습(<code>train_and_register.py</code> 등)은
++        항상 가장 최근에 올라온 파일을 사용합니다. <code>data/sample_power_daily.csv</code>를 예시로 올려보세요
++        (컬럼: Date, Demand(GWh), Temp(℃), Holiday(0/1) · 최소 42행).
++      </p>
++    </div>
++    <div class="upload-row">
++      <input type="file" id="upload-input" accept=".csv" />
++      <button class="btn primary" onclick="uploadFile()">업로드</button>
++    </div>
++    <div id="upload-status" style="margin-top:10px;"></div>
++  </div>
++
++  <!-- ================= 드리프트 시뮬레이션 ================= -->
++  <div class="card">
++    <div class="section-head">
++      <h2>드리프트 시뮬레이션</h2>
++      <!-- 🔧 [전력수요 변경] 랜덤워크 대신 서버(/data/sample-batch)가 2025년 실제 42일을 잘라 주고, 드리프트 시나리오를 고름 -->
++      <p>
++        업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 전송합니다.
++        드리프트 배치는 같은 42일에 아래 시나리오의 변화를 덧씌운 것입니다. 최근 28일 RMSE가 75 GWh를 넘으면
++        감지 → 재학습 → (게이트 통과 시) 재배포까지 진행됩니다.
++      </p>
++    </div>
++    <div class="btn-row">
++      <select id="scenario-select" class="btn secondary">
++        <option value="ramp">수요 점진 증가 (0 → +25%)</option>
++        <option value="level">수요 일괄 증가 (+15%)</option>
++        <option value="temp_bias">기온 센서 오류 (+8℃)</option>
++      </select>
++      <button class="btn primary" onclick="sendBatch('normal')">정상 배치 전송</button>
++      <button class="btn danger" onclick="sendBatch('drift')">드리프트 배치 전송</button>
++    </div>
++    <div id="drift-status" style="margin-top:14px;"></div>
++    <div id="drift-result" class="result-box"></div>
++  </div>
++
++  <!-- ================= 파이프라인 ================= -->
++  <div class="card">
++    <div class="section-head-row">
++      <div class="section-head">
++        <h2>드리프트 감지 기반 재학습 파이프라인</h2>
++        <p>위에서 배치를 보내면, 그 요청이 실제로 거쳐간 단계를 아래에 표시합니다 (자동 스케줄러는 없고, 수동 트리거 방식입니다).</p>
++      </div>
++      <div class="pipeline-meta">
++        <span class="pill neutral" id="pipeline-run-badge">아직 실행 안 함</span>
++      </div>
++    </div>
++    <div class="pipeline-track" id="pipeline-track"></div>
++  </div>
++
++  <!-- ================= 재학습 로그 ================= -->
++  <div class="card">
++    <div class="section-head-row">
++      <div class="section-head">
++        <h2>재학습 로그</h2>
++        <p>
++          드리프트 감지·재학습 트리거는 <code>logs/aiops.log</code>에 그대로 기록됩니다.
++          <code>[WARN] drift detected</code> → <code>[INFO] retrain triggered</code> →
++          <code>[OK] new_rmse=... promoted</code> 순서로 남는지 아래에서 직접 열어 확인하세요.
++        </p>
++      </div>
++    </div>
++    <div class="btn-row" id="log-file-list"></div>
++    <div id="log-content" class="result-box"></div>
++  </div>
++
++</div>
++
++<footer>전력수요 예측 AIOps · 드리프트 감지 → 재학습 파이프라인 (serving_app/static/index.html)</footer>
++
++<script>
++/* ===================== 전역 상태 ===================== */
++// 서버(data/features.py, monitoring/drift_detector.py)와 동일한 값 (상수만 복제)
++const SEQ_LEN = 14;          // 🔧 [전력수요 변경] 20 → 14
++const WINDOW_SIZE = 28;      // 🔧 [전력수요 변경] 21 → 28
++const RMSE_THRESHOLD = 75.0; // 🔧 [전력수요 변경] $4 → 75 GWh
++
++let lastPipelineRun = null; // { driftCheck, clientRmse, ts }
++
++// 🔧 [전력수요 변경] NORMAL_SIGMA / DRIFT_SIGMA / DEFAULT_BASE_PRICE (랜덤워크 설정) 삭제
++const PIPELINE_STAGES = [
++  { key: "collect", title: "데이터 수집", desc: "요청 수신" },
++  { key: "monitor", title: "데이터 모니터링", desc: "예측 기록 누적" },
++  { key: "detect", title: "드리프트 감지", desc: "RMSE vs 임계치" },
++  { key: "trigger", title: "재학습 트리거", desc: "조건 충족 시 시작" },
++  { key: "train", title: "모델 학습", desc: "fine-tuning" },
++  { key: "register", title: "모델 등록", desc: "MLflow Registry" },
++  { key: "deploy", title: "배포", desc: "Production 승격" },
++];
++
++/* ===================== 유틸 ===================== */
++// 🔧 [전력수요 변경] randn() / randomWalk() 삭제 — 배치는 서버의 GET /data/sample-batch 가 만듦
++function rmseOf(actual, predicted) {
++  const n = Math.min(actual.length, predicted.length);
++  if (n === 0) return null;
++  let sum = 0;
++  for (let i = 0; i < n; i++) sum += (actual[i] - predicted[i]) ** 2;
++  return Math.sqrt(sum / n);
++}
++function relTime(ts) {
++  if (!ts) return "-";
++  const diff = Math.max(0, Date.now() / 1000 - ts);
++  if (diff < 60) return `${Math.floor(diff)}초 전`;
++  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
++  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
++  return `${Math.floor(diff / 86400)}일 전`;
++}
++async function getJSON(path) {
++  const res = await fetch(path);
++  const data = await res.json().catch(() => null);
++  return { ok: res.ok, status: res.status, data };
++}
++// 서버가 500 등을 일반 텍스트("Internal Server Error")로 응답할 수도 있어
++// (예: model_loader.py의 _load_from_mlflow TODO가 아직 NotImplementedError를 던지는 경우),
++// res.json()을 바로 쓰지 않고 텍스트로 먼저 받아 파싱을 시도한다.
++async function safeJson(res) {
++  const text = await res.text();
++  try { return JSON.parse(text); } catch (e) { return { __raw: text || "(응답 없음)" }; }
++}
++function showResult(el, obj, isError = false) {
++  el.classList.add("show");
++  el.style.borderColor = isError ? "var(--err)" : "var(--border)";
++  el.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
++}
++
++/* ===================== 데이터 업로드 ===================== */
++async function uploadFile() {
++  const input = document.getElementById("upload-input");
++  const statusEl = document.getElementById("upload-status");
++  if (!input.files.length) {
++    statusEl.innerHTML = `<span class="pill warn"><span class="dot"></span>파일을 먼저 선택하세요</span>`;
++    return;
++  }
++  const form = new FormData();
++  form.append("file", input.files[0]);
++  statusEl.innerHTML = `<span class="pill neutral"><span class="dot"></span>업로드 중…</span>`;
++  try {
++    const res = await fetch("/data/upload", { method: "POST", body: form });
++    const data = await safeJson(res);
++    if (!res.ok) {
++      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${data.detail || "업로드 실패"}</span>`;
++      return;
++    }
++    statusEl.innerHTML = `<span class="pill ok"><span class="dot"></span>업로드 완료: ${data.filename} (${data.rows}행)</span>`;
++  } catch (e) {
++    statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>요청 실패: ${e.message}</span>`;
++  }
++}
++
++/* ===================== 재학습 로그 ===================== */
++async function loadLogFiles() {
++  const { ok, data } = await getJSON("/logs");
++  const wrap = document.getElementById("log-file-list");
++  if (!ok || !data || !data.length) {
++    wrap.innerHTML = `<span class="pill neutral">아직 로그가 없습니다 - 드리프트 배치를 보내면 logs/aiops.log가 생깁니다</span>`;
++    return;
++  }
++  wrap.innerHTML = data.map((f) =>
++    `<button class="btn secondary" onclick="openLogFile('${f.name}')">${f.name} (${f.size}B)</button>`
++  ).join("");
++}
++async function openLogFile(name) {
++  const box = document.getElementById("log-content");
++  const { ok, data } = await getJSON(`/logs/${encodeURIComponent(name)}`);
++  if (!ok || !data) { showResult(box, "불러오기 실패", true); return; }
++  showResult(box, data.content || "(비어 있음)");
++}
++
++/* ===================== 파이프라인 시각화 ===================== */
++function renderPipeline() {
++  const track = document.getElementById("pipeline-track");
++  const badge = document.getElementById("pipeline-run-badge");
++
++  if (!lastPipelineRun) {
++    badge.className = "pill neutral"; badge.textContent = "아직 실행 안 함";
++    track.innerHTML = PIPELINE_STAGES.map((s, i) => stageHtml(s, i, "idle", "대기 중")).join("");
++    return;
++  }
++
++  const { driftCheck, ts } = lastPipelineRun;
++  badge.className = "pill neutral";
++  badge.textContent = `마지막 실행 ${relTime(ts)}`;
++
++  const serverStatus = driftCheck.status; // "ok" | "retrain_triggered"
++  const promoted = driftCheck.promoted;
++
++  let states; // 7개 단계 상태: idle | ok | warn
++  if (serverStatus === "retrain_triggered" && promoted === true) {
++    states = ["ok", "ok", "warn", "ok", "ok", "ok", "ok"];
++  } else if (serverStatus === "retrain_triggered" && promoted === false) {
++    states = ["ok", "ok", "warn", "ok", "ok", "warn", "idle"];
++  } else if (serverStatus === "retrain_triggered") {
++    states = ["ok", "ok", "warn", "idle", "idle", "idle", "idle"];
++  } else {
++    states = ["ok", "ok", "ok", "idle", "idle", "idle", "idle"];
++  }
++  const statusText = { ok: "완료", warn: "감지됨", idle: "대기 중" };
++
++  track.innerHTML = PIPELINE_STAGES.map((s, i) => stageHtml(s, i, states[i], statusText[states[i]])).join("");
++}
++function stageHtml(stage, idx, state, statusLabel) {
++  return `
++    <div class="pipe-stage ${state}">
++      <div class="pipe-title">${stage.title}</div>
++      <div class="pipe-desc">${stage.desc}</div>
++      <div class="pipe-status">${statusLabel}</div>
++    </div>`;
++}
++
++/* ===================== 드리프트 배치 전송 ===================== */
++async function sendBatch(kind) {
++  const statusEl = document.getElementById("drift-status");
++  const resultBox = document.getElementById("drift-result");
++  // 🔧 [전력수요 변경] 브라우저 랜덤워크 → 서버에서 2025년 실제 42일 배치(records)를 받아 그대로 전송
++  const scenario = document.getElementById("scenario-select").value;
++
++  statusEl.innerHTML = `<span class="pill warn"><span class="dot"></span>전송 중… (fine-tuning이 걸리면 수십 초 걸릴 수 있습니다)</span>`;
++
++  try {
++    const batchRes = await fetch(`/data/sample-batch?kind=${kind}&scenario=${scenario}`);
++    const batch = await safeJson(batchRes);
++    if (!batchRes.ok) {
++      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${batch.detail || "배치 생성 실패 - CSV를 먼저 업로드하세요"}</span>`;
++      return;
++    }
++    const records = batch.records;
++    const res = await fetch("/predict/batch-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ records }) });
++    const data = await safeJson(res);
++    if (!res.ok) {
++      const reason = data.__raw
++        ? "서버 오류 - model_loader.py 또는 predict.py의 TODO가 아직 구현되지 않았을 수 있습니다"
++        : "오류 (TODO 미구현일 수 있음)";
++      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${reason}</span>`;
++      showResult(resultBox, { status: res.status, detail: data }, true);
++      return;
++    }
++    // 🔧 [전력수요 변경] 실제값은 서버 응답의 actuals 사용 (슬라이딩 윈도우 규칙은 빈칸 6과 동일: i + SEQ_LEN)
++    const actual = data.actuals || records.slice(SEQ_LEN).map((r) => r.demand);
++    const clientRmse = rmseOf(actual, data.predictions || []);
++
++    lastPipelineRun = { driftCheck: data.drift_check || {}, clientRmse, ts: Date.now() / 1000 };
++    renderPipeline();
++    loadLogFiles();
++
++    const check = data.drift_check || {};
++    let level = "ok", label = `정상 (드리프트 없음 · 최근 ${WINDOW_SIZE}일 RMSE ${check.rmse?.toFixed?.(1) ?? "-"} GWh ≤ ${RMSE_THRESHOLD})`;
++    if (check.status === "retrain_triggered" && check.promoted) {
++      level = "ok"; label = `드리프트(${check.drift_rmse?.toFixed?.(1)} GWh) → 재학습 완료 · 새 버전 승격 (rmse=${check.rmse?.toFixed?.(1) ?? check.rmse}, 기존 ${check.champion_rmse?.toFixed?.(1)})`;
++    } else if (check.status === "retrain_triggered" && check.promoted === false) {
++      level = "warn"; label = `드리프트 감지 · 재학습했지만 게이트 미통과 (rmse=${check.rmse?.toFixed?.(1) ?? check.rmse}, 기존 ${check.champion_rmse?.toFixed?.(1)})`;
++    } else if (check.status === "retrain_triggered") {
++      level = "warn"; label = "드리프트 감지 · 재학습 트리거됨";
++    }
++    statusEl.innerHTML = `
++      <span class="pill ${level}"><span class="dot"></span>${label}</span>
++      <span class="pill neutral" style="margin-left:6px;">클라이언트 계산 RMSE: ${clientRmse != null ? clientRmse.toFixed(1) + " GWh" : "-"}</span>`;
++    showResult(resultBox, data, false);
++  } catch (e) {
++    statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>연결 실패</span>`;
++    showResult(resultBox, "요청 실패: " + e.message, true);
++  }
++}
++
++/* ===================== 초기화 ===================== */
++async function init() {
++  renderPipeline();
++  loadLogFiles();
++}
++init();
++</script>
++</body>
++</html>
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/static/index.html 2_전력수요_AIOps/serving_app/static/index.html
+--- 1_빈칸정답_HAIC/serving_app/static/index.html	2026-09-29 15:20:34
++++ 2_전력수요_AIOps/serving_app/static/index.html	2026-10-02 09:22:23
+@@ -1,406 +1,690 @@
+ <!DOCTYPE html>
++<!--
++  🆕 [데모 대시보드 추가] (전체 새로 작성) 전력수요 AIOps 운영 대시보드 — 교수님 데모(4탭) 구성을 따름.
++    Dashboard  : 운영 지표 요약(/metrics/summary) · 파이프라인 · 재학습 이력(/metrics/versions)
++                 · 현재 운영 모델(/metrics/current-model) · 최근 알람(/metrics/alerts)
++    Simulation : 정상/드리프트 배치 전송(/data/sample-batch → /predict/batch-test) + 실제 vs 예측 그래프
++    Datasets   : CSV 업로드(/data/upload) · 데이터 현황(/data/status)
++    System     : 서버 상태(/health, /metrics/system) · 로그 파일 열람(/logs)
++  이전 화면(1장짜리 실습 대시보드)은 static/basic.html 에 그대로 남아 있습니다 → http://localhost:8077/basic.html
++  모든 숫자는 서버의 로그 파일·MLflow Registry 에서 읽은 실제 값입니다 (가짜 값 없음).
++-->
+ <html lang="ko">
+ <head>
+ <meta charset="UTF-8" />
+ <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-<title>AIOps · HAIC 재학습 파이프라인</title>
++<title>AIOps · 전력수요 운영 대시보드</title>
+ <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+ <style>
+   :root {
+-    --bg: #0a0c10;
+-    --panel: #12151c;
+-    --panel-2: #171b25;
+-    --border: #262b38;
+-    --text: #eef1f7;
+-    --muted: #9aa4b8;
+-    --faint: #5b6478;
+-    --accent: #6c8dff;
+-    --accent-soft: rgba(108, 141, 255, 0.16);
+-    --ok: #3ddc97;
+-    --ok-soft: rgba(61, 220, 151, 0.14);
+-    --warn: #f5b64c;
+-    --warn-soft: rgba(245, 182, 76, 0.14);
+-    --err: #ff6b6b;
+-    --err-soft: rgba(255, 107, 107, 0.14);
++    color-scheme: light;
++    --bg: #f4f5f7;
++    --panel: #ffffff;
++    --panel-2: #f7f8fa;
++    --border: #e4e6eb;
++    --text: #111318;
++    --text-2: #52514e;
++    --muted: #8a8f99;
++    --accent: #2a78d6;          /* series-1 (blue) */
++    --accent-soft: #e8f1fc;
++    --series-2: #eb6834;        /* series-2 (orange) */
++    --good: #0ca30c; --good-text: #067a06; --good-soft: #e7f6e7;
++    --warn: #fab219; --warn-text: #9a6a00; --warn-soft: #fff5dc;
++    --crit: #d03b3b; --crit-text: #b22c2c; --crit-soft: #fdeaea;
++    --grid: #eceef1;
+     --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard, sans-serif;
++    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard, "Apple SD Gothic Neo", sans-serif;
+   }
+-  * { box-sizing: border-box; }
+-  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); }
+-
+-  .topnav {
+-    display: flex; align-items: center; gap: 14px; justify-content: space-between;
+-    background: var(--panel); border-bottom: 1px solid var(--border);
+-    padding: 0 20px; height: 60px; position: sticky; top: 0; z-index: 10;
++  @media (prefers-color-scheme: dark) {
++    :root:not([data-theme="light"]) {
++      color-scheme: dark;
++      --bg: #111111; --panel: #1a1a19; --panel-2: #222221; --border: #2f2f2d;
++      --text: #f4f4f2; --text-2: #c3c2b7; --muted: #8f8e86;
++      --accent: #3987e5; --accent-soft: #1c2a3d; --series-2: #d95926;
++      --good-text: #4cc94c; --good-soft: #15291a; --warn-text: #fab219; --warn-soft: #2f2711;
++      --crit-text: #ef7a7a; --crit-soft: #331a1a; --grid: #2a2a28;
++    }
+   }
+-  .brand { display: flex; align-items: center; gap: 10px; }
+-  .brand-mark {
+-    width: 34px; height: 34px; border-radius: 9px;
+-    background: linear-gradient(135deg, var(--accent), #a9bdff);
+-    display: flex; align-items: center; justify-content: center; color: #0a0c10;
+-    flex-shrink: 0;
++  :root[data-theme="dark"] {
++    color-scheme: dark;
++    --bg: #111111; --panel: #1a1a19; --panel-2: #222221; --border: #2f2f2d;
++    --text: #f4f4f2; --text-2: #c3c2b7; --muted: #8f8e86;
++    --accent: #3987e5; --accent-soft: #1c2a3d; --series-2: #d95926;
++    --good-text: #4cc94c; --good-soft: #15291a; --warn-text: #fab219; --warn-soft: #2f2711;
++    --crit-text: #ef7a7a; --crit-soft: #331a1a; --grid: #2a2a28;
+   }
+-  .brand-text .title { font-weight: 700; font-size: 1.02rem; line-height: 1.2; }
+-  .brand-text .subtitle { font-size: 0.72rem; color: var(--muted); }
+-  .nav-right { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
+-  .pill {
+-    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px;
+-    font-size: 0.74rem; font-weight: 700;
+-  }
+-  .pill.ok { background: var(--ok-soft); color: var(--ok); }
+-  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+-  .pill.err { background: var(--err-soft); color: var(--err); }
+-  .pill.neutral { background: var(--panel-2); color: var(--muted); }
+-  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
++  * { box-sizing: border-box; }
++  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
++  code { font-family: var(--mono); font-size: 0.86em; background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
+ 
+-  .page { max-width: 980px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
++  /* ---------- 상단 바 ---------- */
++  .topbar { background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 20; }
++  .topbar-inner { max-width: 1280px; margin: 0 auto; padding: 0 20px; height: 62px; display: flex; align-items: center; gap: 28px; }
++  .brand { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
++  .brand-mark { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(135deg, #2a78d6, #6da7ec); display: flex; align-items: center; justify-content: center; }
++  .brand .t1 { font-weight: 800; font-size: 1.05rem; line-height: 1.1; }
++  .brand .t2 { font-size: 0.72rem; color: var(--muted); }
++  .tabs { display: flex; gap: 4px; height: 100%; }
++  .tab { background: none; border: none; color: var(--text-2); font: inherit; font-weight: 600; padding: 0 12px; cursor: pointer; border-bottom: 3px solid transparent; }
++  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
++  .top-right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 0.8rem; color: var(--text-2); white-space: nowrap; }
++  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; font-size: 0.74rem; font-weight: 700; }
++  .pill.blue { background: var(--accent-soft); color: var(--accent); }
++  .pill.good { background: var(--good-soft); color: var(--good-text); }
++  .pill.warn { background: var(--warn-soft); color: var(--warn-text); }
++  .pill.crit { background: var(--crit-soft); color: var(--crit-text); }
++  .pill.neutral { background: var(--panel-2); color: var(--text-2); border: 1px solid var(--border); }
++  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+ 
+-  .card {
+-    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+-    padding: 18px 20px;
+-  }
+-  .section-head { margin-bottom: 14px; }
+-  .section-head h2 { margin: 0 0 3px; font-size: 1.05rem; }
+-  .section-head p { margin: 0; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
+-  .section-head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
++  /* ---------- 레이아웃 ---------- */
++  .page { max-width: 1280px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
++  .view { display: none; flex-direction: column; gap: 16px; }
++  .view.active { display: flex; }
++  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; min-width: 0; }
++  .card h2 { margin: 0 0 3px; font-size: 1.05rem; }
++  .card .sub { margin: 0 0 14px; color: var(--muted); font-size: 0.8rem; line-height: 1.5; }
++  .head-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
++  .grid-main { display: grid; grid-template-columns: minmax(0, 2.1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
++  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
++  .top-right { min-width: 0; flex-shrink: 1; }
++  .top-right .pill { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
++  @media (max-width: 1000px) { .grid-main { grid-template-columns: 1fr; } .tabs { overflow-x: auto; } .topbar-inner { gap: 14px; } .top-right .clock { display: none; } }
++  @media (max-width: 760px) { .brand .t2 { display: none; } .tab { padding: 0 8px; } .top-right { display: none; } }
+ 
+-  .btn { border: none; border-radius: 9px; padding: 9px 14px; font-size: 0.83rem; font-weight: 700; cursor: pointer; }
+-  .btn.primary { background: var(--accent); color: #0a0c10; }
+-  .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+-  .btn.danger { background: var(--err); color: #1a0a0a; }
++  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
++  .seg button { background: var(--panel); border: none; color: var(--text-2); font: inherit; font-size: 0.78rem; font-weight: 600; padding: 6px 12px; cursor: pointer; }
++  .seg button + button { border-left: 1px solid var(--border); }
++  .seg button.active { background: var(--accent); color: #fff; }
++
++  .btn { border: none; border-radius: 9px; padding: 9px 14px; font: inherit; font-size: 0.83rem; font-weight: 700; cursor: pointer; }
++  .btn.primary { background: var(--accent); color: #fff; }
++  .btn.danger { background: var(--crit); color: #fff; }
++  .btn.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+-  .btn-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
++  select.btn { appearance: auto; }
+ 
+-  /* ---------- Upload ---------- */
+-  .upload-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+-  input[type="file"] {
+-    color: var(--muted); font-size: 0.82rem; max-width: 100%;
+-  }
++  /* ---------- KPI 타일 ---------- */
++  .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
++  @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
++  @media (max-width: 560px) { .kpis { grid-template-columns: 1fr; } }
++  .kpi { border: 1px solid var(--border); border-radius: 12px; padding: 14px 14px 10px; min-width: 0; }
++  .kpi .label { font-size: 0.78rem; color: var(--text-2); font-weight: 600; }
++  .kpi .value { font-size: 1.75rem; font-weight: 800; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
++  .kpi .value small { font-size: 0.9rem; font-weight: 700; color: var(--text-2); margin-left: 3px; }
++  .kpi .extra { font-size: 0.74rem; color: var(--text-2); min-height: 1.1em; }
++  .kpi .cap { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
++  .spark { width: 100%; height: 44px; display: block; margin-top: 6px; }
+ 
+-  /* ---------- Pipeline ---------- */
+-  .pipeline-meta { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: var(--muted); }
+-  .pipeline-track { display: flex; align-items: stretch; overflow-x: auto; padding: 2px 2px 4px; gap: 0; }
+-  .pipe-stage { flex: 1; min-width: 110px; text-align: center; padding: 10px 10px; border-left: 1px solid var(--border); }
+-  .pipe-stage:first-child { border-left: none; }
+-  .pipe-title { font-size: 0.82rem; font-weight: 700; color: var(--faint); }
+-  .pipe-stage.ok .pipe-title, .pipe-stage.warn .pipe-title { color: var(--text); }
+-  .pipe-desc { font-size: 0.7rem; color: var(--muted); margin: 2px 0 6px; line-height: 1.4; }
+-  .pipe-status { font-size: 0.7rem; font-weight: 700; }
+-  .pipe-stage.ok .pipe-status { color: var(--ok); }
+-  .pipe-stage.warn .pipe-status { color: var(--warn); }
+-  .pipe-stage.idle .pipe-status { color: var(--faint); }
++  /* ---------- 파이프라인 ---------- */
++  .pipeline { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); position: relative; padding-top: 4px; }
++  .pipeline::before { content: ""; position: absolute; left: 7%; right: 7%; top: 28px; height: 2px; background: var(--border); }
++  .stage { text-align: center; position: relative; padding: 0 2px; }
++  .stage .ic { width: 50px; height: 50px; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; background: var(--panel); border: 2px solid var(--border); color: var(--muted); position: relative; }
++  .stage.ok .ic { border-color: var(--good); color: var(--good-text); }
++  .stage.warn .ic { border-color: var(--warn); color: var(--warn-text); }
++  .stage.fail .ic { border-color: var(--crit); color: var(--crit-text); }
++  .stage .nm { font-weight: 700; font-size: 0.82rem; }
++  .stage .ds { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
++  .stage .st { font-size: 0.74rem; font-weight: 700; margin-top: 4px; color: var(--muted); }
++  .stage.ok .st { color: var(--good-text); } .stage.warn .st { color: var(--warn-text); } .stage.fail .st { color: var(--crit-text); }
++  @media (max-width: 700px) { .pipeline { grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: 14px; } .pipeline::before { display: none; } }
+ 
+-  /* ---------- Tables ---------- */
+-  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+-  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 0.74rem; text-transform: uppercase;
+-       letter-spacing: 0.03em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+-  td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+-  tr:last-child td { border-bottom: none; }
+-  .table-empty { color: var(--faint); font-size: 0.82rem; padding: 20px 4px; text-align: center; }
++  /* ---------- 표 ---------- */
++  .table-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
++  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
++  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 0.76rem; padding: 8px 10px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
++  td { padding: 9px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; font-variant-numeric: tabular-nums; }
++  td.num, th.num { text-align: right; }
++  .tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.74rem; font-weight: 600; background: var(--panel-2); color: var(--text-2); border: 1px solid var(--border); }
+ 
+-  .result-box {
+-    margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: var(--panel-2);
+-    border: 1px solid var(--border); font-family: var(--mono); font-size: 0.8rem;
+-    white-space: pre-wrap; word-break: break-word; display: none; max-height: 260px; overflow-y: auto;
+-  }
+-  .result-box.show { display: block; }
++  /* ---------- 현재 모델 / 알람 ---------- */
++  .kv { display: grid; grid-template-columns: auto 1fr; gap: 9px 12px; font-size: 0.84rem; }
++  .kv .k { color: var(--muted); }
++  .kv .v { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
++  .model-name { font-size: 1.15rem; font-weight: 800; margin: 2px 0 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
++  .alerts { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
++  .alerts li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--grid); }
++  .alerts .ai { width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.72rem; font-weight: 800; }
++  .alerts .ai.info { background: var(--accent-soft); color: var(--accent); }
++  .alerts .ai.ok { background: var(--good-soft); color: var(--good-text); }
++  .alerts .ai.warn { background: var(--warn-soft); color: var(--warn-text); }
++  .alerts .ai.fail { background: var(--crit-soft); color: var(--crit-text); }
++  .alerts .msg { font-size: 0.82rem; line-height: 1.45; word-break: break-word; }
++  .alerts .when { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
++  .empty { color: var(--muted); font-size: 0.82rem; padding: 10px 0; }
+ 
+-  code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+-  footer { color: var(--faint); font-size: 0.76rem; text-align: center; margin: 26px 0 10px; }
++  /* ---------- 그래프 / 툴팁 ---------- */
++  .chart { width: 100%; height: 300px; display: block; }
++  .legend { display: flex; gap: 16px; font-size: 0.8rem; color: var(--text-2); margin: 4px 0 8px; flex-wrap: wrap; }
++  .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
++  .tooltip { position: fixed; pointer-events: none; z-index: 50; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 0.78rem; box-shadow: 0 6px 18px rgba(0,0,0,.12); display: none; white-space: nowrap; }
++  .tooltip .tt-h { color: var(--muted); margin-bottom: 3px; }
++  .tooltip .tt-r { display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
++  .tooltip .tt-r i { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
++
++  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
++  .result-box { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-family: var(--mono); font-size: 0.76rem; white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; margin-top: 12px; }
++  details summary { cursor: pointer; color: var(--text-2); font-size: 0.82rem; margin-top: 12px; }
++  .stat-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 14px 0 6px; }
++  @media (max-width: 700px) { .stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
++  .stat { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
++  .stat .l { font-size: 0.74rem; color: var(--muted); }
++  .stat .n { font-size: 1.2rem; font-weight: 800; margin-top: 3px; font-variant-numeric: tabular-nums; }
++  footer { text-align: center; color: var(--muted); font-size: 0.75rem; padding: 10px 0 30px; }
+ </style>
+ </head>
+ <body>
+ 
+-<div class="topnav">
+-  <div class="brand">
+-    <div class="brand-mark">
+-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M2 12h4l2-7 4 14 3-10 2 3h5" stroke="#0a0c10" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
++<div class="topbar">
++  <div class="topbar-inner">
++    <div class="brand">
++      <div class="brand-mark">
++        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M2 12h4l2-7 4 14 3-10 2 3h5" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
++      </div>
++      <div><div class="t1">AIOps</div><div class="t2">전력수요 ML Pipeline for Reliable Service</div></div>
+     </div>
+-    <div class="brand-text">
+-      <div class="title">AIOps · HAIC</div>
+-      <div class="subtitle">드리프트 감지 기반 재학습 파이프라인</div>
++    <nav class="tabs" role="tablist">
++      <button class="tab active" data-view="dashboard">Dashboard</button>
++      <button class="tab" data-view="simulation">Simulation</button>
++      <button class="tab" data-view="datasets">Datasets</button>
++      <button class="tab" data-view="system">System</button>
++    </nav>
++    <div class="top-right">
++      <span class="clock" id="clock"></span>
++      <span class="pill blue" id="source-pill">MODEL_SOURCE=…</span>
+     </div>
+   </div>
+-  <div class="nav-right">
+-    <span class="pill neutral">MODEL_SOURCE=mlflow 기준</span>
+-  </div>
+ </div>
+ 
+ <div class="page">
+ 
+-  <!-- ================= 데이터 업로드 ================= -->
++<!-- ═══════════════════════════ Dashboard ═══════════════════════════ -->
++<section class="view active" id="view-dashboard">
+   <div class="card">
+-    <div class="section-head">
+-      <h2>HAIC 데이터 업로드</h2>
+-      <p>
+-        <code>data/uploads/</code>는 여기서 업로드한 CSV만 쌓이는 곳입니다. 학습(<code>train_and_register.py</code> 등)은
+-        항상 가장 최근에 올라온 파일을 사용합니다. <code>data/sample_haic_prices.csv</code>를 예시로 올려보세요
+-        (컬럼: Date, Close, Volume · 최소 41행).
+-      </p>
++    <div class="head-row">
++      <div>
++        <h2>운영 지표 요약</h2>
++        <p class="sub"><code>logs/requests.log</code>를 실제로 읽어 시간 구간별로 집계한 값입니다 (요청이 없으면 0으로 표시). 모델 성능은 MLflow 등록 버전, 드리프트 점수는 최근 28일 예측 기록에서 계산합니다.</p>
++      </div>
++      <div class="seg" id="window-seg">
++        <button data-w="5m" class="active">5분</button><button data-w="1h">1시간</button><button data-w="6h">6시간</button><button data-w="24h">24시간</button>
++      </div>
+     </div>
+-    <div class="upload-row">
+-      <input type="file" id="upload-input" accept=".csv" />
+-      <button class="btn primary" onclick="uploadFile()">업로드</button>
++    <div class="kpis">
++      <div class="kpi"><div class="label">요청 수 (Requests)</div><div class="value" id="k-req">-</div><div class="extra" id="k-req-x"></div><svg class="spark" id="s-req"></svg><div class="cap" id="k-req-cap">최근 5분</div></div>
++      <div class="kpi"><div class="label">평균 응답시간 (Latency)</div><div class="value" id="k-lat">-</div><div class="extra" id="k-lat-x"></div><svg class="spark" id="s-lat"></svg><div class="cap" id="k-lat-cap">최근 5분</div></div>
++      <div class="kpi"><div class="label">성공률 (Success Rate)</div><div class="value" id="k-ok">-</div><div class="extra" id="k-ok-x"></div><svg class="spark" id="s-ok"></svg><div class="cap" id="k-ok-cap">최근 5분</div></div>
++      <div class="kpi"><div class="label">모델 성능 (RMSE)</div><div class="value" id="k-rmse">-</div><div class="extra" id="k-rmse-x"></div><svg class="spark" id="s-rmse"></svg><div class="cap">MLflow 등록 버전별 추이</div></div>
++      <div class="kpi"><div class="label">드리프트 점수 (최근 28일 RMSE)</div><div class="value" id="k-drift">-</div><div class="extra" id="k-drift-x"></div><svg class="spark" id="s-drift"></svg><div class="cap" id="k-drift-cap">임계치 - GWh</div></div>
+     </div>
+-    <div id="upload-status" style="margin-top:10px;"></div>
+   </div>
+ 
+-  <!-- ================= 드리프트 시뮬레이션 ================= -->
+-  <div class="card">
+-    <div class="section-head">
+-      <h2>드리프트 시뮬레이션</h2>
+-      <p>
+-        일별 수익률(log return) 기반 랜덤워크로 정상/드리프트 배치를 만들어 <code>/predict/batch-test</code>로 전송합니다.
+-        드리프트 배치를 보내면 아래 파이프라인이 감지 → 재학습 → (게이트 통과 시) 재배포까지 진행됩니다.
+-      </p>
++  <div class="grid-main">
++    <div class="col">
++      <div class="card">
++        <div class="head-row">
++          <div>
++            <h2>드리프트 감지 기반 재학습 파이프라인</h2>
++            <p class="sub">Simulation 탭에서 배치를 보내면 그 요청이 실제로 거쳐 간 단계를 표시합니다 (자동 스케줄러 없이 수동 트리거 방식).</p>
++          </div>
++          <span class="pill neutral" id="pipe-badge">아직 실행 안 함</span>
++        </div>
++        <div class="pipeline" id="pipeline"></div>
++      </div>
++
++      <div class="card">
++        <h2>재학습 이력</h2>
++        <p class="sub">MLflow Model Registry(<code>Power_Demand_Predictor</code>)에 등록된 버전을 그대로 보여 줍니다. base 학습 RMSE는 2025년 365일, fine-tune RMSE는 최근 관측 구간 마지막 6일 기준이라 서로 직접 비교하지 않습니다.</p>
++        <div class="table-wrap">
++          <table>
++            <thead><tr><th>버전</th><th>등록 시각</th><th>모드</th><th class="num">RMSE (GWh)</th><th class="num">기존 모델 RMSE</th><th>스테이지</th></tr></thead>
++            <tbody id="versions-body"><tr><td colspan="6" class="empty">불러오는 중…</td></tr></tbody>
++          </table>
++        </div>
++      </div>
+     </div>
+-    <div class="btn-row">
+-      <button class="btn primary" onclick="sendBatch('normal')">정상 배치 전송</button>
+-      <button class="btn danger" onclick="sendBatch('drift')">드리프트 배치 전송</button>
++
++    <div class="col">
++      <div class="card">
++        <div class="head-row"><h2>현재 운영 모델</h2><span class="pill neutral" id="health-pill">확인 중</span></div>
++        <div class="model-name"><span id="m-name">-</span><span class="tag" id="m-ver">-</span></div>
++        <div class="kv" id="m-kv"></div>
++        <div class="row" style="margin-top:14px;"><button class="btn ghost" onclick="refreshAll()">새로고침</button><span class="cap" style="font-size:.74rem;color:var(--muted)">5초마다 자동 갱신</span></div>
++      </div>
++      <div class="card">
++        <h2>최근 알람</h2>
++        <p class="sub"><code>aiops</code> 로거가 <code>logs/aiops.log</code>에 남긴 [WARN]/[INFO]/[OK]/[FAIL] 줄을 그대로 보여 줍니다.</p>
++        <ul class="alerts" id="alerts"><li class="empty">불러오는 중…</li></ul>
++      </div>
+     </div>
+-    <div id="drift-status" style="margin-top:14px;"></div>
+-    <div id="drift-result" class="result-box"></div>
+   </div>
++</section>
+ 
+-  <!-- ================= 파이프라인 ================= -->
++<!-- ═══════════════════════════ Simulation ═══════════════════════════ -->
++<section class="view" id="view-simulation">
+   <div class="card">
+-    <div class="section-head-row">
+-      <div class="section-head">
+-        <h2>드리프트 감지 기반 재학습 파이프라인</h2>
+-        <p>위에서 배치를 보내면, 그 요청이 실제로 거쳐간 단계를 아래에 표시합니다 (자동 스케줄러는 없고, 수동 트리거 방식입니다).</p>
+-      </div>
+-      <div class="pipeline-meta">
+-        <span class="pill neutral" id="pipeline-run-badge">아직 실행 안 함</span>
+-      </div>
++    <h2>드리프트 시뮬레이션</h2>
++    <p class="sub">업로드된 CSV에서 학습에 쓰지 않은 <b>2025년 실제 연속 42일</b>을 골라 <code>/predict/batch-test</code>로 보냅니다 (14일 창문 × 28번 예측). 드리프트 배치는 같은 42일에 아래 시나리오를 덧씌운 것이고, 최근 28일 RMSE가 <b id="thr-text">75</b> GWh를 넘으면 감지 → fine-tuning → (게이트 통과 시) 재배포까지 진행됩니다.</p>
++    <div class="row">
++      <select id="scenario" class="btn ghost">
++        <option value="ramp">수요 점진 증가 (0 → +25%)</option>
++        <option value="level">수요 일괄 증가 (+15%)</option>
++        <option value="temp_bias">기온 센서 오류 (+8℃)</option>
++      </select>
++      <button class="btn primary" id="btn-normal" onclick="sendBatch('normal')">정상 배치 전송</button>
++      <button class="btn danger" id="btn-drift" onclick="sendBatch('drift')">드리프트 배치 전송</button>
++      <span id="sim-status"></span>
+     </div>
+-    <div class="pipeline-track" id="pipeline-track"></div>
++    <div class="stat-row" id="sim-stats" style="display:none;">
++      <div class="stat"><div class="l">기간</div><div class="n" id="st-range" style="font-size:.95rem">-</div></div>
++      <div class="stat"><div class="l">최근 28일 RMSE</div><div class="n" id="st-rmse">-</div></div>
++      <div class="stat"><div class="l">MAPE</div><div class="n" id="st-mape">-</div></div>
++      <div class="stat"><div class="l" id="st-judge-l">판정</div><div class="n" id="st-judge" style="font-size:.95rem">-</div></div>
++    </div>
++    <div id="sim-chart-wrap" style="display:none;">
++      <div class="legend"><span><i style="background:var(--accent)"></i>실제 수요</span><span><i style="background:var(--series-2)"></i>모델 예측</span></div>
++      <svg class="chart" id="sim-chart"></svg>
++      <details><summary>표로 보기 / 응답 원문</summary>
++        <div class="table-wrap" style="max-height:260px;margin-top:8px;"><table><thead><tr><th>날짜</th><th class="num">실제 (GWh)</th><th class="num">예측 (GWh)</th><th class="num">오차</th></tr></thead><tbody id="sim-table"></tbody></table></div>
++        <div class="result-box" id="sim-raw"></div>
++      </details>
++    </div>
+   </div>
++</section>
+ 
+-  <!-- ================= 재학습 로그 ================= -->
++<!-- ═══════════════════════════ Datasets ═══════════════════════════ -->
++<section class="view" id="view-datasets">
+   <div class="card">
+-    <div class="section-head-row">
+-      <div class="section-head">
+-        <h2>재학습 로그</h2>
+-        <p>
+-          드리프트 감지·재학습 트리거는 <code>logs/aiops.log</code>에 그대로 기록됩니다.
+-          <code>[WARN] drift detected</code> → <code>[INFO] retrain triggered</code> →
+-          <code>[OK] new_rmse=... promoted</code> 순서로 남는지 아래에서 직접 열어 확인하세요.
+-        </p>
++    <h2>전력수요 데이터 업로드</h2>
++    <p class="sub"><code>data/uploads/</code>에 쌓이고, 학습·시뮬레이션은 가장 최근 파일을 씁니다. 예시: <code>data/sample_power_daily.csv</code> (컬럼 Date, Demand(GWh), Temp(℃), Holiday(0/1) · 최소 42행).</p>
++    <div class="row"><input type="file" id="upload-input" accept=".csv" /><button class="btn primary" onclick="uploadFile()">업로드</button><span id="upload-status"></span></div>
++  </div>
++  <div class="card">
++    <h2>현재 사용 중인 데이터</h2>
++    <p class="sub"><code>/data/status</code> — 가장 최근 업로드 파일 요약</p>
++    <div class="kv" id="ds-kv" style="max-width:520px;"></div>
++  </div>
++  <div class="card">
++    <h2>파일 목록</h2>
++    <p class="sub">업로드 파일(<code>data/uploads/</code>)과 서빙 중 쌓인 관측 데이터(<code>data/observed/observed.csv</code>, 재학습 원천)</p>
++    <div class="table-wrap"><table><thead><tr><th>구분</th><th>파일</th><th class="num">크기</th></tr></thead><tbody id="ds-files"></tbody></table></div>
++  </div>
++</section>
++
++<!-- ═══════════════════════════ System ═══════════════════════════ -->
++<section class="view" id="view-system">
++  <div class="grid-main">
++    <div class="col">
++      <div class="card">
++        <h2>서버 상태</h2>
++        <p class="sub"><code>/health</code> · <code>/metrics/system</code></p>
++        <div class="kv" id="sys-kv"></div>
+       </div>
++      <div class="card">
++        <h2>로그 파일</h2>
++        <p class="sub"><code>logs/</code> 폴더 — 클릭하면 내용을 그대로 엽니다 (<code>/logs/{파일명}</code>)</p>
++        <div class="row" id="log-list"></div>
++        <div class="result-box" id="log-content" style="display:none;"></div>
++      </div>
+     </div>
+-    <div class="btn-row" id="log-file-list"></div>
+-    <div id="log-content" class="result-box"></div>
++    <div class="col">
++      <div class="card">
++        <h2>API</h2>
++        <p class="sub">전체 명세는 <a href="/docs" target="_blank">/docs</a> (Swagger UI)</p>
++        <table><tbody>
++          <tr><td><code>POST /predict</code></td><td>14일 기록 → 다음날 수요</td></tr>
++          <tr><td><code>POST /predict/batch-test</code></td><td>드리프트 시뮬레이션</td></tr>
++          <tr><td><code>POST /data/upload</code></td><td>CSV 업로드</td></tr>
++          <tr><td><code>GET /data/status</code></td><td>데이터 요약</td></tr>
++          <tr><td><code>GET /metrics/summary</code></td><td>운영 지표</td></tr>
++          <tr><td><code>GET /metrics/versions</code></td><td>재학습 이력</td></tr>
++          <tr><td><code>GET /metrics/alerts</code></td><td>최근 알람</td></tr>
++          <tr><td><code>GET /health</code></td><td>헬스체크</td></tr>
++        </tbody></table>
++        <p class="sub" style="margin-top:12px;">이전 1장짜리 실습 대시보드: <a href="/basic.html">/basic.html</a></p>
++      </div>
++    </div>
+   </div>
++</section>
+ 
++<footer>전력수요 예측 AIOps · 교수님 HAIC 데모 대시보드 구성을 전력수요 버전으로 재구성 (serving_app/static/index.html)</footer>
+ </div>
+ 
+-<footer>HAIC AIOps 실습 · 드리프트 감지 → 재학습 파이프라인 (serving_app/static/index.html)</footer>
++<div class="tooltip" id="tooltip"></div>
+ 
+ <script>
+-/* ===================== 전역 상태 ===================== */
+-// 서버(data/features.py, monitoring/drift_detector.py)와 동일한 값 (상수만 복제)
+-const SEQ_LEN = 20;
+-const WINDOW_SIZE = 21;
+-const RMSE_THRESHOLD = 4.0;
+-
+-let lastPipelineRun = null; // { driftCheck, clientRmse, ts }
+-
+-const NORMAL_SIGMA = 0.012;
+-const DRIFT_SIGMA = NORMAL_SIGMA * 3;
+-const DEFAULT_BASE_PRICE = 165.0;
+-const PIPELINE_STAGES = [
+-  { key: "collect", title: "데이터 수집", desc: "요청 수신" },
+-  { key: "monitor", title: "데이터 모니터링", desc: "예측 기록 누적" },
+-  { key: "detect", title: "드리프트 감지", desc: "RMSE vs 임계치" },
+-  { key: "trigger", title: "재학습 트리거", desc: "조건 충족 시 시작" },
+-  { key: "train", title: "모델 학습", desc: "fine-tuning" },
+-  { key: "register", title: "모델 등록", desc: "MLflow Registry" },
+-  { key: "deploy", title: "배포", desc: "Production 승격" },
++/* ═══════════════════════ 공통 ═══════════════════════ */
++const STAGES = [
++  { key: "collect", name: "데이터 수집", desc: "요청 수신", icon: '<path d="M4 7h16M4 12h16M4 17h10" />' },
++  { key: "monitor", name: "데이터 모니터링", desc: "예측 기록 누적", icon: '<path d="M5 19V10M12 19V5M19 19v-7" />' },
++  { key: "detect", name: "드리프트 감지", desc: "RMSE vs 임계치", icon: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>' },
++  { key: "trigger", name: "재학습 트리거", desc: "조건 충족 시 시작", icon: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>' },
++  { key: "train", name: "모델 학습", desc: "fine-tuning", icon: '<path d="M4 18c3-8 7-12 16-13M4 18h16"/>' },
++  { key: "register", name: "모델 등록", desc: "MLflow Registry", icon: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/>' },
++  { key: "deploy", name: "배포", desc: "Production 승격", icon: '<path d="M12 3v12M7 10l5 5 5-5M5 20h14"/>' },
+ ];
++let currentWindow = "5m";
++const WINDOW_LABEL = { "5m": "최근 5분", "1h": "최근 1시간", "6h": "최근 6시간", "24h": "최근 24시간" };
++let THRESHOLD = 75;
+ 
+-/* ===================== 유틸 ===================== */
+-function randn() {
+-  let u = 0, v = 0;
+-  while (u === 0) u = Math.random();
+-  while (v === 0) v = Math.random();
+-  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+-}
+-function randomWalk(n, base, sigma) {
+-  const prices = [];
+-  let logPrice = Math.log(base);
+-  for (let i = 0; i < n; i++) { logPrice += randn() * sigma; prices.push(Math.exp(logPrice)); }
+-  return prices;
+-}
+-function rmseOf(actual, predicted) {
+-  const n = Math.min(actual.length, predicted.length);
+-  if (n === 0) return null;
+-  let sum = 0;
+-  for (let i = 0; i < n; i++) sum += (actual[i] - predicted[i]) ** 2;
+-  return Math.sqrt(sum / n);
+-}
++const $ = (id) => document.getElementById(id);
++const fmt = (v, d = 1) => (v == null || isNaN(v) ? "-" : Number(v).toLocaleString("ko-KR", { minimumFractionDigits: d, maximumFractionDigits: d }));
++const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "-";
+ function relTime(ts) {
+-  if (!ts) return "-";
+-  const diff = Math.max(0, Date.now() / 1000 - ts);
+-  if (diff < 60) return `${Math.floor(diff)}초 전`;
+-  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+-  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+-  return `${Math.floor(diff / 86400)}일 전`;
++  if (!ts) return "";
++  const d = Date.now() / 1000 - ts;
++  if (d < 60) return `${Math.max(0, Math.floor(d))}초 전`;
++  if (d < 3600) return `${Math.floor(d / 60)}분 전`;
++  if (d < 86400) return `${Math.floor(d / 3600)}시간 전`;
++  return `${Math.floor(d / 86400)}일 전`;
+ }
+ async function getJSON(path) {
+-  const res = await fetch(path);
+-  const data = await res.json().catch(() => null);
+-  return { ok: res.ok, status: res.status, data };
++  try {
++    const res = await fetch(path);
++    const text = await res.text();
++    let data = null; try { data = JSON.parse(text); } catch (e) { data = { __raw: text }; }
++    return { ok: res.ok, data };
++  } catch (e) { return { ok: false, data: { detail: e.message } }; }
+ }
+-// 서버가 500 등을 일반 텍스트("Internal Server Error")로 응답할 수도 있어
+-// (예: model_loader.py의 _load_from_mlflow TODO가 아직 NotImplementedError를 던지는 경우),
+-// res.json()을 바로 쓰지 않고 텍스트로 먼저 받아 파싱을 시도한다.
+-async function safeJson(res) {
+-  const text = await res.text();
+-  try { return JSON.parse(text); } catch (e) { return { __raw: text || "(응답 없음)" }; }
++const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
++
++/* ═══════════════════════ 탭 ═══════════════════════ */
++document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
++function showView(name) {
++  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
++  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
++  try { localStorage.setItem("aiops-tab", name); } catch (e) {}
++  if (name === "datasets") loadDatasets();
++  if (name === "system") loadSystem();
+ }
+-function showResult(el, obj, isError = false) {
+-  el.classList.add("show");
+-  el.style.borderColor = isError ? "var(--err)" : "var(--border)";
+-  el.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
++document.querySelectorAll("#window-seg button").forEach((b) => b.addEventListener("click", () => {
++  currentWindow = b.dataset.w;
++  document.querySelectorAll("#window-seg button").forEach((x) => x.classList.toggle("active", x === b));
++  loadSummary();
++}));
++
++/* ═══════════════════════ 그래프 (SVG) ═══════════════════════ */
++const tip = $("tooltip");
++function showTip(evt, html) {
++  tip.innerHTML = html; tip.style.display = "block";
++  const w = tip.offsetWidth, h = tip.offsetHeight;
++  let x = evt.clientX + 14, y = evt.clientY - h - 10;
++  if (x + w > window.innerWidth - 8) x = evt.clientX - w - 14;
++  if (y < 8) y = evt.clientY + 14;
++  tip.style.left = x + "px"; tip.style.top = y + "px";
+ }
++function hideTip() { tip.style.display = "none"; }
+ 
+-/* ===================== 데이터 업로드 ===================== */
+-async function uploadFile() {
+-  const input = document.getElementById("upload-input");
+-  const statusEl = document.getElementById("upload-status");
+-  if (!input.files.length) {
+-    statusEl.innerHTML = `<span class="pill warn"><span class="dot"></span>파일을 먼저 선택하세요</span>`;
+-    return;
+-  }
+-  const form = new FormData();
+-  form.append("file", input.files[0]);
+-  statusEl.innerHTML = `<span class="pill neutral"><span class="dot"></span>업로드 중…</span>`;
+-  try {
+-    const res = await fetch("/data/upload", { method: "POST", body: form });
+-    const data = await safeJson(res);
+-    if (!res.ok) {
+-      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${data.detail || "업로드 실패"}</span>`;
+-      return;
++/**
++ * 선 그래프. series=[{name, color, values}], labels=[x축 라벨], opts={axes, threshold, unit, fmtv}
++ * 값이 null 인 칸은 선을 끊습니다. 마우스를 올리면 세로선 + 툴팁(모든 시리즈 값)을 보여 줍니다.
++ */
++function lineChart(svg, series, labels, opts = {}) {
++  const W = svg.clientWidth || 300, H = svg.clientHeight || 44;
++  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
++  const axes = !!opts.axes;
++  const pad = axes ? { l: 52, r: 14, t: 10, b: 26 } : { l: 2, r: 6, t: 6, b: 4 };
++  const all = series.flatMap((s) => s.values).filter((v) => v != null);
++  if (opts.threshold != null) all.push(opts.threshold);
++  if (!all.length) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2 + 4}" text-anchor="middle" font-size="11" fill="var(--muted)">데이터 없음</text>`; return; }
++  let lo = Math.min(...all), hi = Math.max(...all);
++  if (opts.zero) lo = Math.min(0, lo);
++  if (hi === lo) { hi += 1; lo = Math.max(0, lo - 1); }
++  const span = hi - lo; hi += span * 0.08; if (!opts.zero) lo -= span * 0.08;
++  const n = labels.length;
++  const X = (i) => pad.l + (n <= 1 ? (W - pad.l - pad.r) / 2 : (i * (W - pad.l - pad.r)) / (n - 1));
++  const Y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
++  const fv = opts.fmtv || ((v) => fmt(v));
++  let g = "";
++  if (axes) {
++    for (let k = 0; k <= 4; k++) {
++      const v = lo + ((hi - lo) * k) / 4, y = Y(v);
++      g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`;
++      g += `<text x="${pad.l - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${Math.round(v).toLocaleString("ko-KR")}</text>`;
+     }
+-    statusEl.innerHTML = `<span class="pill ok"><span class="dot"></span>업로드 완료: ${data.filename} (${data.rows}행)</span>`;
+-  } catch (e) {
+-    statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>요청 실패: ${e.message}</span>`;
++    const step = Math.max(1, Math.ceil(n / 7));
++    for (let i = 0; i < n; i += step) g += `<text x="${X(i)}" y="${H - 7}" text-anchor="middle" font-size="11" fill="var(--muted)">${esc(labels[i])}</text>`;
+   }
+-}
+-
+-/* ===================== 재학습 로그 ===================== */
+-async function loadLogFiles() {
+-  const { ok, data } = await getJSON("/logs");
+-  const wrap = document.getElementById("log-file-list");
+-  if (!ok || !data || !data.length) {
+-    wrap.innerHTML = `<span class="pill neutral">아직 로그가 없습니다 - 드리프트 배치를 보내면 logs/aiops.log가 생깁니다</span>`;
+-    return;
++  if (opts.threshold != null) {
++    const y = Y(opts.threshold);
++    g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y}" y2="${y}" stroke="var(--crit)" stroke-width="1.5" stroke-dasharray="4 3"/>`;
++    if (axes) g += `<text x="${W - pad.r}" y="${y - 5}" text-anchor="end" font-size="11" fill="var(--crit-text)">임계치 ${opts.threshold}</text>`;
+   }
+-  wrap.innerHTML = data.map((f) =>
+-    `<button class="btn secondary" onclick="openLogFile('${f.name}')">${f.name} (${f.size}B)</button>`
+-  ).join("");
++  for (const s of series) {
++    let d = "", pen = false;
++    s.values.forEach((v, i) => { if (v == null) { pen = false; return; } d += (pen ? "L" : "M") + X(i).toFixed(1) + " " + Y(v).toFixed(1) + " "; pen = true; });
++    g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
++    const li = s.values.map((v, i) => (v == null ? -1 : i)).filter((i) => i >= 0).pop();
++    if (li != null && li >= 0) g += `<circle cx="${X(li)}" cy="${Y(s.values[li])}" r="3.5" fill="${s.color}" stroke="var(--panel)" stroke-width="2"/>`;
++  }
++  g += `<line id="xh" x1="0" x2="0" y1="${pad.t}" y2="${H - pad.b}" stroke="var(--muted)" stroke-width="1" visibility="hidden"/>`;
++  g += `<rect x="0" y="0" width="${W}" height="${H}" fill="transparent"/>`;
++  svg.innerHTML = g;
++  const xh = svg.querySelector("#xh");
++  svg.onmousemove = (e) => {
++    const r = svg.getBoundingClientRect();
++    const px = ((e.clientX - r.left) / r.width) * W;
++    let i = n <= 1 ? 0 : Math.round(((px - pad.l) / (W - pad.l - pad.r)) * (n - 1));
++    i = Math.max(0, Math.min(n - 1, i));
++    xh.setAttribute("x1", X(i)); xh.setAttribute("x2", X(i)); xh.setAttribute("visibility", "visible");
++    const rows = series.map((s) => `<div class="tt-r"><i style="background:${s.color}"></i>${esc(s.name)} <b>${s.values[i] == null ? "-" : fv(s.values[i])}</b></div>`).join("");
++    showTip(e, `<div class="tt-h">${esc(labels[i])}</div>${rows}`);
++  };
++  svg.onmouseleave = () => { xh.setAttribute("visibility", "hidden"); hideTip(); };
+ }
+-async function openLogFile(name) {
+-  const box = document.getElementById("log-content");
+-  const { ok, data } = await getJSON(`/logs/${encodeURIComponent(name)}`);
+-  if (!ok || !data) { showResult(box, "불러오기 실패", true); return; }
+-  showResult(box, data.content || "(비어 있음)");
+-}
+ 
+-/* ===================== 파이프라인 시각화 ===================== */
+-function renderPipeline() {
+-  const track = document.getElementById("pipeline-track");
+-  const badge = document.getElementById("pipeline-run-badge");
++/* ═══════════════════════ Dashboard ═══════════════════════ */
++async function loadSummary() {
++  const { ok, data } = await getJSON(`/metrics/summary?window=${currentWindow}`);
++  if (!ok) return;
++  const s = data.service, m = data.model, d = data.drift;
++  THRESHOLD = d.threshold; $("thr-text").textContent = d.threshold;
++  const lbl = WINDOW_LABEL[currentWindow];
++  ["k-req-cap", "k-lat-cap", "k-ok-cap"].forEach((id) => ($(id).textContent = lbl));
++  const tl = s.series.map((b) => new Date(b.t * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) + "까지");
+ 
+-  if (!lastPipelineRun) {
+-    badge.className = "pill neutral"; badge.textContent = "아직 실행 안 함";
+-    track.innerHTML = PIPELINE_STAGES.map((s, i) => stageHtml(s, i, "idle", "대기 중")).join("");
+-    return;
+-  }
++  $("k-req").textContent = s.requests.toLocaleString("ko-KR");
++  $("k-req-x").textContent = "";
++  lineChart($("s-req"), [{ name: "요청 수", color: "var(--accent)", values: s.series.map((b) => b.requests) }], tl, { zero: true, fmtv: (v) => v + "건" });
+ 
+-  const { driftCheck, ts } = lastPipelineRun;
+-  badge.className = "pill neutral";
+-  badge.textContent = `마지막 실행 ${relTime(ts)}`;
++  $("k-lat").innerHTML = `${fmt(s.avg_latency_ms, 0)}<small>ms</small>`;
++  $("k-lat-x").textContent = s.requests ? `p95 ${fmt(s.p95_latency_ms, 0)} ms` : "";
++  lineChart($("s-lat"), [{ name: "평균 응답시간", color: "var(--accent)", values: s.series.map((b) => b.avg_latency_ms) }], tl, { zero: true, fmtv: (v) => fmt(v, 0) + " ms" });
+ 
+-  const serverStatus = driftCheck.status; // "ok" | "retrain_triggered"
+-  const promoted = driftCheck.promoted;
++  $("k-ok").innerHTML = `${fmt(s.success_rate, 1)}<small>%</small>`;
++  $("k-ok-x").textContent = s.requests ? `실패 ${Math.round(s.requests * (1 - s.success_rate / 100))}건` : "";
++  lineChart($("s-ok"), [{ name: "성공률", color: "var(--accent)", values: s.series.map((b) => b.success_rate) }], tl, { fmtv: (v) => fmt(v, 1) + "%" });
+ 
+-  let states; // 7개 단계 상태: idle | ok | warn
+-  if (serverStatus === "retrain_triggered" && promoted === true) {
+-    states = ["ok", "ok", "warn", "ok", "ok", "ok", "ok"];
+-  } else if (serverStatus === "retrain_triggered" && promoted === false) {
+-    states = ["ok", "ok", "warn", "ok", "ok", "warn", "idle"];
+-  } else if (serverStatus === "retrain_triggered") {
+-    states = ["ok", "ok", "warn", "idle", "idle", "idle", "idle"];
+-  } else {
+-    states = ["ok", "ok", "ok", "idle", "idle", "idle", "idle"];
+-  }
+-  const statusText = { ok: "완료", warn: "감지됨", idle: "대기 중" };
++  $("k-rmse").innerHTML = m.rmse != null ? `${fmt(m.rmse, 1)}<small>GWh</small>` : "-";
++  $("k-rmse-x").textContent = m.production_version ? `Production v${m.production_version} · ${m.mode}` : "Production 없음";
++  lineChart($("s-rmse"), [{ name: "RMSE", color: "var(--accent)", values: m.trend.map((t) => t.rmse) }], m.trend.map((t) => `v${t.version} (${t.mode})`), { fmtv: (v) => fmt(v, 1) + " GWh" });
+ 
+-  track.innerHTML = PIPELINE_STAGES.map((s, i) => stageHtml(s, i, states[i], statusText[states[i]])).join("");
++  const over = d.score != null && d.score > d.threshold;
++  $("k-drift").innerHTML = d.score != null ? `${fmt(d.score, 1)}<small>GWh</small>` : "-";
++  $("k-drift").style.color = over ? "var(--crit-text)" : "";
++  const lastJudge = d.history[d.history.length - 1];
++  const retrained = over && lastJudge && lastJudge.status === "retrain_triggered";
++  $("k-drift-x").innerHTML = d.score == null ? "아직 예측 기록 없음"
++    : retrained ? `<span class="pill crit">▲ 임계치 초과</span> <span style="font-size:.72rem">→ 재학습 ${lastJudge.promoted ? "승격 완료" : "했지만 미승격"}</span>`
++    : over ? `<span class="pill crit">▲ 임계치 초과</span>` : `<span class="pill good">● 정상 범위</span>`;
++  $("k-drift-cap").textContent = `임계치 ${d.threshold} GWh · 최근 판정 ${d.history.length}회`;
++  lineChart($("s-drift"), [{ name: "드리프트 점수", color: "var(--accent)", values: d.history.map((h) => h.rmse) }], d.history.map((h) => fmtTime(h.ts)), { threshold: d.threshold, fmtv: (v) => fmt(v, 1) + " GWh" });
++
++  renderPipeline(d.history[d.history.length - 1]);
+ }
+-function stageHtml(stage, idx, state, statusLabel) {
+-  return `
+-    <div class="pipe-stage ${state}">
+-      <div class="pipe-title">${stage.title}</div>
+-      <div class="pipe-desc">${stage.desc}</div>
+-      <div class="pipe-status">${statusLabel}</div>
+-    </div>`;
++
++function renderPipeline(last) {
++  const badge = $("pipe-badge");
++  let states = ["idle", "idle", "idle", "idle", "idle", "idle", "idle"], label = "대기 중";
++  if (last) {
++    badge.textContent = `마지막 실행 ${relTime(last.ts)}`;
++    if (last.status === "retrain_triggered" && last.promoted) states = ["ok", "ok", "warn", "ok", "ok", "ok", "ok"];
++    else if (last.status === "retrain_triggered") states = ["ok", "ok", "warn", "ok", "ok", "fail", "idle"];
++    else states = ["ok", "ok", "ok", "idle", "idle", "idle", "idle"];
++  } else badge.textContent = "아직 실행 안 함";
++  const st = { ok: "완료", warn: "감지됨", fail: "게이트 미통과", idle: "대기 중" };
++  $("pipeline").innerHTML = STAGES.map((s, i) => {
++    const state = states[i];
++    const text = state === "ok" && i === 2 ? "정상" : st[state];
++    return `<div class="stage ${state}"><div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${s.icon}</svg></div>
++      <div class="nm">${s.name}</div><div class="ds">${s.desc}</div><div class="st">${text}</div></div>`;
++  }).join("");
+ }
+ 
+-/* ===================== 드리프트 배치 전송 ===================== */
+-async function sendBatch(kind) {
+-  const statusEl = document.getElementById("drift-status");
+-  const resultBox = document.getElementById("drift-result");
+-  const n = SEQ_LEN + WINDOW_SIZE;
+-  const sigma = kind === "drift" ? DRIFT_SIGMA : NORMAL_SIGMA;
+-  const prices = randomWalk(n, DEFAULT_BASE_PRICE, sigma);
++async function loadVersions() {
++  const { ok, data } = await getJSON("/metrics/versions");
++  const body = $("versions-body");
++  if (!ok || !data.length) { body.innerHTML = `<tr><td colspan="6" class="empty">등록된 버전이 없습니다 — <code>python serving_app/train_and_register.py</code>를 먼저 실행하세요</td></tr>`; return; }
++  body.innerHTML = data.map((v) => {
++    const stage = v.stage === "Production" ? `<span class="pill good"><span class="dot"></span>Production</span>`
++      : v.stage === "Archived" ? `<span class="pill neutral">Archived</span>` : `<span class="pill neutral">${esc(v.stage)}</span>`;
++    return `<tr><td><b>v${v.version}</b></td><td>${fmtTime(v.registered_at)}</td><td><span class="tag">${esc(v.mode)}</span></td>
++      <td class="num">${fmt(v.rmse, 1)}</td><td class="num">${v.champion_rmse != null ? fmt(v.champion_rmse, 1) : "-"}</td><td>${stage}</td></tr>`;
++  }).join("");
++}
+ 
+-  statusEl.innerHTML = `<span class="pill warn"><span class="dot"></span>전송 중… (fine-tuning이 걸리면 수십 초 걸릴 수 있습니다)</span>`;
++async function loadCurrentModel() {
++  const { ok, data } = await getJSON("/metrics/current-model");
++  if (!ok) return;
++  const p = data.production;
++  $("m-name").textContent = data.name;
++  $("m-ver").textContent = p ? `v${p.version}` : "없음";
++  $("health-pill").className = "pill " + (data.healthy ? "good" : "crit");
++  $("health-pill").innerHTML = `<span class="dot"></span>${data.healthy ? "Healthy" : "Production 없음"}`;
++  $("m-kv").innerHTML = [
++    ["스테이지", p ? p.stage : "-"],
++    ["학습 방식", p ? p.mode : "-"],
++    ["RMSE / 게이트", p ? `${fmt(p.rmse, 1)} / ${data.gate_rmse} GWh` : "-"],
++    ["MAPE", p && p.mape != null ? fmt(p.mape, 2) + "%" : "-"],
++    ["등록 시각", p ? fmtTime(p.registered_at) : "-"],
++    ["서빙 중인 모델", data.serving_version || (p ? `다음 요청 때 v${p.version} 로드 (lazy)` : "아직 로드 안 됨")],
++  ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${esc(v)}</div>`).join("");
++}
+ 
+-  try {
+-    const res = await fetch("/predict/batch-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prices }) });
+-    const data = await safeJson(res);
+-    if (!res.ok) {
+-      const reason = data.__raw
+-        ? "서버 오류 - model_loader.py 또는 predict.py의 TODO가 아직 구현되지 않았을 수 있습니다"
+-        : "오류 (TODO 미구현일 수 있음)";
+-      statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>${reason}</span>`;
+-      showResult(resultBox, { status: res.status, detail: data }, true);
+-      return;
+-    }
+-    const actual = [];
+-    for (let i = 0; i < prices.length - SEQ_LEN; i++) actual.push(prices[i + SEQ_LEN]);
+-    const clientRmse = rmseOf(actual, data.predictions || []);
++async function loadAlerts() {
++  const { ok, data } = await getJSON("/metrics/alerts?limit=30");
++  const ul = $("alerts");
++  if (!ok || !data.length) { ul.innerHTML = `<li class="empty">아직 알람이 없습니다 — 드리프트 배치를 보내면 기록됩니다</li>`; return; }
++  const icon = { ok: "✓", warn: "!", fail: "✕", info: "i" };
++  ul.innerHTML = data.map((a) => `<li><span class="ai ${a.level}">${icon[a.level]}</span><div><div class="msg">${esc(a.message)}</div><div class="when">${relTime(a.ts)} · ${fmtTime(a.ts)}</div></div></li>`).join("");
++}
+ 
+-    lastPipelineRun = { driftCheck: data.drift_check || {}, clientRmse, ts: Date.now() / 1000 };
+-    renderPipeline();
+-    loadLogFiles();
++async function refreshAll() {
++  await Promise.all([loadSummary(), loadVersions(), loadCurrentModel(), loadAlerts()]);
++}
+ 
+-    const check = data.drift_check || {};
+-    let level = "ok", label = "정상 (드리프트 없음)";
+-    if (check.status === "retrain_triggered" && check.promoted) {
+-      level = "ok"; label = `재학습 완료 · 새 버전 승격 (rmse=${check.rmse?.toFixed?.(2) ?? check.rmse})`;
+-    } else if (check.status === "retrain_triggered" && check.promoted === false) {
+-      level = "warn"; label = `드리프트 감지 · 재학습했지만 게이트 미통과 (rmse=${check.rmse?.toFixed?.(2) ?? check.rmse})`;
+-    } else if (check.status === "retrain_triggered") {
+-      level = "warn"; label = "드리프트 감지 · 재학습 트리거됨";
+-    }
+-    statusEl.innerHTML = `
+-      <span class="pill ${level}"><span class="dot"></span>${label}</span>
+-      <span class="pill neutral" style="margin-left:6px;">클라이언트 계산 RMSE: $${clientRmse != null ? clientRmse.toFixed(2) : "-"}</span>`;
+-    showResult(resultBox, data, false);
++/* ═══════════════════════ Simulation ═══════════════════════ */
++async function sendBatch(kind) {
++  const status = $("sim-status");
++  const scenario = $("scenario").value;
++  $("btn-normal").disabled = $("btn-drift").disabled = true;
++  status.innerHTML = `<span class="pill warn"><span class="dot"></span>전송 중… (재학습이 걸리면 5~10초)</span>`;
++  try {
++    const b = await getJSON(`/data/sample-batch?kind=${kind}&scenario=${scenario}`);
++    if (!b.ok) { status.innerHTML = `<span class="pill crit"><span class="dot"></span>${esc(b.data.detail || "배치 생성 실패 — Datasets 탭에서 CSV를 먼저 업로드하세요")}</span>`; return; }
++    const records = b.data.records;
++    const res = await fetch("/predict/batch-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ records }) });
++    const text = await res.text(); let data; try { data = JSON.parse(text); } catch (e) { data = { __raw: text }; }
++    if (!res.ok) { status.innerHTML = `<span class="pill crit"><span class="dot"></span>서버 오류 (${res.status})</span>`; $("sim-raw").textContent = text; return; }
++    renderSim(kind, scenario, records, data);
++    refreshAll();
+   } catch (e) {
+-    statusEl.innerHTML = `<span class="pill err"><span class="dot"></span>연결 실패</span>`;
+-    showResult(resultBox, "요청 실패: " + e.message, true);
++    status.innerHTML = `<span class="pill crit"><span class="dot"></span>연결 실패: ${esc(e.message)}</span>`;
++  } finally {
++    $("btn-normal").disabled = $("btn-drift").disabled = false;
+   }
+ }
+ 
+-/* ===================== 초기화 ===================== */
++function renderSim(kind, scenario, records, data) {
++  const c = data.drift_check || {};
++  const dates = records.slice(records.length - data.predictions.length).map((r) => r.date);
++  const act = data.actuals, pred = data.predictions;
++  const mape = act.reduce((s, a, i) => s + Math.abs(a - pred[i]) / a, 0) / act.length * 100;
++  const rmse = c.drift_rmse ?? c.rmse;
++  let pill, judge;
++  if (c.status === "retrain_triggered" && c.promoted) { pill = `<span class="pill good"><span class="dot"></span>드리프트 → 재학습 · 새 버전 승격 (새 RMSE ${fmt(c.rmse, 1)}, 기존 ${fmt(c.champion_rmse, 1)})</span>`; judge = "감지 → 새 버전 승격"; }
++  else if (c.status === "retrain_triggered") { pill = `<span class="pill warn"><span class="dot"></span>드리프트 감지 · 재학습했지만 게이트 미통과 (새 ${fmt(c.rmse, 1)}, 기존 ${fmt(c.champion_rmse, 1)})</span>`; judge = "감지 → 기존 모델 유지"; }
++  else { pill = `<span class="pill good"><span class="dot"></span>정상 (드리프트 없음)</span>`; judge = "정상"; }
++  $("sim-status").innerHTML = pill;
++  $("sim-stats").style.display = ""; $("sim-chart-wrap").style.display = "";
++  $("st-judge-l").textContent = kind === "drift" ? "판정 (드리프트 배치)" : "판정 (정상 배치)";
++  $("st-range").textContent = `${records[0].date} ~ ${records[records.length - 1].date}`;
++  $("st-rmse").innerHTML = `${fmt(rmse, 1)} <small style="font-size:.75rem;color:var(--text-2)">GWh</small>`;
++  $("st-rmse").style.color = rmse > THRESHOLD ? "var(--crit-text)" : "";
++  $("st-mape").textContent = fmt(mape, 2) + "%";
++  $("st-judge").textContent = judge;
++  $("st-judge").title = kind === "drift" ? `보낸 배치: 드리프트 (${$("scenario").selectedOptions[0].text})` : "보낸 배치: 정상";
++  const labels = dates.map((d) => d.slice(5));
++  lineChart($("sim-chart"), [
++    { name: "실제 수요", color: "var(--accent)", values: act },
++    { name: "모델 예측", color: "var(--series-2)", values: pred },
++  ], labels, { axes: true, fmtv: (v) => fmt(v, 1) + " GWh" });
++  $("sim-table").innerHTML = dates.map((d, i) => `<tr><td>${d}</td><td class="num">${fmt(act[i], 1)}</td><td class="num">${fmt(pred[i], 1)}</td><td class="num">${fmt(act[i] - pred[i], 1)}</td></tr>`).join("");
++  $("sim-raw").textContent = JSON.stringify({ drift_check: c }, null, 2);
++}
++
++/* ═══════════════════════ Datasets ═══════════════════════ */
++async function uploadFile() {
++  const input = $("upload-input"), st = $("upload-status");
++  if (!input.files.length) { st.innerHTML = `<span class="pill warn"><span class="dot"></span>파일을 먼저 선택하세요</span>`; return; }
++  const form = new FormData(); form.append("file", input.files[0]);
++  st.innerHTML = `<span class="pill neutral">업로드 중…</span>`;
++  const res = await fetch("/data/upload", { method: "POST", body: form });
++  const data = await res.json().catch(() => ({}));
++  st.innerHTML = res.ok ? `<span class="pill good"><span class="dot"></span>업로드 완료: ${esc(data.filename)} (${data.rows}행)</span>`
++    : `<span class="pill crit"><span class="dot"></span>${esc(data.detail || "업로드 실패")}</span>`;
++  loadDatasets();
++}
++async function loadDatasets() {
++  const [{ data: st }, { data: sys }] = await Promise.all([getJSON("/data/status"), getJSON("/metrics/system")]);
++  $("ds-kv").innerHTML = st && st.exists ? [
++    ["파일", st.filename], ["행 수", st.rows.toLocaleString("ko-KR") + "일"], ["기간", `${st.start_date} ~ ${st.end_date}`],
++    ["일 수요 범위", `${fmt(st.min_demand_gwh, 1)} ~ ${fmt(st.max_demand_gwh, 1)} GWh`], ["기온 범위", `${fmt(st.min_temp, 1)} ~ ${fmt(st.max_temp, 1)} ℃`],
++    ["관측 데이터 (재학습 원천)", `${(sys?.observed_rows ?? 0).toLocaleString("ko-KR")}행`],
++  ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${esc(v)}</div>`).join("") : `<div class="empty">업로드된 데이터가 없습니다</div>`;
++  const files = (sys?.uploads || []).map((f) => ["업로드", "data/uploads/" + f.name, f.size]);
++  if (sys?.observed_rows) files.push(["관측", "data/observed/observed.csv", null]);
++  $("ds-files").innerHTML = files.length ? files.map(([k, n, sz]) => `<tr><td><span class="tag">${k}</span></td><td>${esc(n)}</td><td class="num">${sz == null ? "-" : (sz / 1024).toFixed(1) + " KB"}</td></tr>`).join("")
++    : `<tr><td colspan="3" class="empty">파일 없음</td></tr>`;
++}
++
++/* ═══════════════════════ System ═══════════════════════ */
++async function loadSystem() {
++  const [{ data: h }, { data: s }] = await Promise.all([getJSON("/health"), getJSON("/metrics/system")]);
++  if (!s) return;
++  const up = s.uptime_sec, upStr = up < 3600 ? `${Math.floor(up / 60)}분 ${up % 60}초` : `${Math.floor(up / 3600)}시간 ${Math.floor((up % 3600) / 60)}분`;
++  $("sys-kv").innerHTML = [
++    ["상태", h?.status === "ok" ? "정상 (ok)" : "확인 필요"], ["모델 로드됨", h?.model_loaded ? "예" : "아니오 (첫 요청 때 로드)"],
++    ["LOADING_MODE", s.loading_mode], ["MODEL_SOURCE", s.model_source], ["MLflow Tracking URI", s.mlflow_tracking_uri],
++    ["가동 시간", upStr], ["드리프트 규칙", `최근 ${s.drift_rule.window_days}일 RMSE > ${s.drift_rule.threshold_gwh} GWh`],
++    ["Python", s.python], ["TensorFlow", s.versions.tensorflow], ["MLflow", s.versions.mlflow], ["FastAPI", s.versions.fastapi], ["NumPy", s.versions.numpy],
++  ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${esc(v)}</div>`).join("");
++  $("log-list").innerHTML = s.logs.length ? s.logs.map((f) => `<button class="btn ghost" onclick="openLog('${esc(f.name)}')">${esc(f.name)} (${(f.size / 1024).toFixed(1)} KB)</button>`).join("")
++    : `<span class="empty">아직 로그가 없습니다</span>`;
++}
++async function openLog(name) {
++  const box = $("log-content");
++  const { ok, data } = await getJSON(`/logs/${encodeURIComponent(name)}`);
++  box.style.display = "block";
++  const lines = ok ? (data.content || "(비어 있음)").trimEnd().split("\n") : ["불러오기 실패"];
++  box.textContent = (lines.length > 200 ? `… (마지막 200줄만 표시, 전체 ${lines.length}줄)\n` : "") + lines.slice(-200).join("\n");
++}
++
++/* ═══════════════════════ 초기화 ═══════════════════════ */
++function tickClock() {
++  $("clock").textContent = new Date().toLocaleString("ko-KR", { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
++}
+ async function init() {
+-  renderPipeline();
+-  loadLogFiles();
++  tickClock(); setInterval(tickClock, 1000);
++  const { data: s } = await getJSON("/metrics/system");
++  if (s) $("source-pill").textContent = `MODEL_SOURCE=${s.model_source}`;
++  renderPipeline(null);
++  await refreshAll();
++  setInterval(() => { if ($("view-dashboard").classList.contains("active")) refreshAll(); }, 5000);
++  let tab = "dashboard"; try { tab = localStorage.getItem("aiops-tab") || "dashboard"; } catch (e) {}
++  showView(tab);
+ }
++window.addEventListener("resize", () => { if ($("view-dashboard").classList.contains("active")) loadSummary(); });
+ init();
+ </script>
+ </body>
+diff --color -ruN -x .DS_Store -x __pycache__ -x *.keras -x *.pkl -x *.csv -x README.md -x mlruns -x mlflow.db -x logs -x uploads -x observed 1_빈칸정답_HAIC/serving_app/train_and_register.py 2_전력수요_AIOps/serving_app/train_and_register.py
+--- 1_빈칸정답_HAIC/serving_app/train_and_register.py	2026-09-29 13:52:58
++++ 2_전력수요_AIOps/serving_app/train_and_register.py	2026-10-01 17:13:25
+@@ -1,15 +1,23 @@
+ """
+-Day2: MLflow로 HAIC LSTM 모델을 학습 -> 기록(Tracking) -> 게이트 검증 -> 등록(Registry) -> Production 승격.
++Day2: MLflow로 전력수요 LSTM 모델을 학습 -> 기록(Tracking) -> 게이트 검증 -> 등록(Registry) -> Production 승격.
+ Day3: 드리프트 감지 후 Production 가중치에서 이어서 학습하는 fine-tuning 재학습.
+ 
+-실습 시나리오 (94번 슬라이드를 LSTM 버전으로 재구성):
+-    1) HAIC 데이터로 base 모델 학습(50 epoch) -> RMSE 확인 (게이트 미달 가능)
+-    2) 게이트($4.00) 통과 시 Production으로 승격
+-    3) (Day3) 드리프트 감지 시 Production 가중치에서 warm-start -> 최근 1개월 데이터로
+-       10 epoch만 fine-tuning (처음부터 다시 학습하지 않음 - 21거래일로는 스크래치 학습이 불안정)
++실습 시나리오:
++    1) 2021~2024 데이터로 base 모델 학습(100 epoch) -> 2025 데이터로 RMSE 확인
++    2) 게이트(75 GWh) 통과 시 Production으로 승격
++    3) (Day3) 드리프트 감지 시 Production 가중치에서 warm-start -> 최근 4주 관측 데이터로
++       10 epoch만 fine-tuning (처음부터 다시 학습하지 않음 - 28일로는 스크래치 학습이 불안정)
+ 
++🔧 [전력수요 변경] 요약
++   - HAICScaler → PowerScaler, HAIC_Predictor → Power_Demand_Predictor
++   - RMSE_GATE $4.00 → 75 GWh  (근거: 2025년이 아닌 2024년 "검증" 데이터로 정함 — scripts/calibrate_on_validation.py.
++     2021~2023 학습 모델의 2024년 28일 구간별 RMSE 최댓값 71.1 GWh → 5 단위 올림. 2025년은 최종 평가에만 사용)
++   - 분할: 날짜 기준 (2021~2024 학습 / 2025 평가), MAPE 지표 추가 기록
++   - fine_tune(): "챔피언-챌린저" 비교 추가 — 같은 평가 구간에서 기존 Production 보다 나을 때만 승격
++     (원본은 게이트만 통과하면 기존보다 나빠도 승격될 수 있었음)
++
+ 실행:
+-    (대시보드에서 HAIC CSV를 먼저 업로드하세요 - data/sample_haic_prices.csv가 예시입니다)
++    (대시보드에서 전력수요 CSV를 먼저 업로드하세요 - data/sample_power_daily.csv가 예시입니다)
+     python scripts/train_baseline_v1.py     # 최초 1회 (scaler.pkl 생성)
+     python serving_app/train_and_register.py
+ """
+@@ -24,20 +32,18 @@
+ from mlflow.tracking import MlflowClient
+ from tensorflow import keras
+ 
+-from data.features import load_rows, build_sequences, train_test_split, HAICScaler
++from data.features import load_rows, build_sequences, train_test_split, PowerScaler, SEQ_LEN  # 🔧 [전력수요 변경]
+ from data.storage import latest_upload
+ from serving_app.lstm_model import build_model
+ 
+-# 시드 고정: LSTM 가중치 초기화가 랜덤이라 시드 없이는 실행마다 RMSE가 크게 흔들려
+-# (관찰치: 2.22~5.29) 게이트($4.00) 통과 여부가 운에 좌우됩니다. numpy/tensorflow/python
+-# random을 한 번에 고정해 재현 가능한 학습 결과를 보장합니다.
++# 시드 고정: LSTM 가중치 초기화가 랜덤이라 시드 없이는 실행마다 RMSE가 흔들립니다.
+ SEED = 42
+ keras.utils.set_random_seed(SEED)
+ 
+-RMSE_GATE = 4.00
+-MODEL_NAME = "HAIC_Predictor"
++RMSE_GATE = 75.0  # 🔧 [전력수요 변경] $4.00 → 75 GWh (2024 검증으로 정함)
++MODEL_NAME = "Power_Demand_Predictor"  # 🔧 [전력수요 변경] HAIC_Predictor → Power_Demand_Predictor
+ SCALER_PATH = "serving_app/models/scaler.pkl"
+-BASE_EPOCHS = 100  # 3층 LSTM + 3년치 데이터 기준, RMSE가 안정적으로 게이트 아래로 수렴하는 지점
++BASE_EPOCHS = 100
+ FINE_TUNE_EPOCHS = 10
+ FINE_TUNE_LR = 1e-4  # base 학습(1e-3)보다 낮은 학습률로 살짝만 갱신
+ 
+@@ -46,49 +52,64 @@
+     return float(np.sqrt(np.mean((np.array(y_true) - np.array(y_pred)) ** 2)))
+ 
+ 
+-def _prepare(rows: list[dict], scaler: HAICScaler):
+-    X, y = build_sequences(rows, scaler)
+-    X_train, y_train, X_test, y_test = train_test_split(X, y)
++def mape(y_true, y_pred) -> float:  # 🔧 [전력수요 변경] (신규)
++    y_true, y_pred = np.array(y_true), np.array(y_pred)
++    return float(np.mean(np.abs(y_true - y_pred) / y_true) * 100)
++
++
++def _prepare(rows: list[dict], scaler: PowerScaler):
++    X, y, dates = build_sequences(rows, scaler)  # 🔧 [전력수요 변경] dates 추가
++    X_train, y_train, X_test, y_test = train_test_split(X, y, dates)  # 🔧 [전력수요 변경] 날짜 기준 분할
+     X_train = np.array(X_train, dtype="float32")
+     X_test = np.array(X_test, dtype="float32")
+-    y_train_scaled = np.array([scaler.scale_close(v) for v in y_train], dtype="float32")
++    y_train_scaled = np.array([scaler.scale_demand(v) for v in y_train], dtype="float32")
+     return X_train, y_train_scaled, X_test, y_test
+ 
+ 
+-def _register_if_gate_passed(model, run_id: str, score: float) -> dict:
++def _predict(model, X, scaler: PowerScaler) -> list[float]:  # 🔧 [전력수요 변경] (신규) 반복 코드 정리
++    return [scaler.inverse_demand(p) for p in model.predict(X, verbose=0).flatten()]
++
++
++def _register_if_gate_passed(model, run_id: str, score: float, champion_score: float | None = None) -> dict:
+     result = {"run_id": run_id, "rmse": score, "promoted": False}
+-    if score <= RMSE_GATE:
++    # 🔧 [전력수요 변경] champion_score 가 있으면(재학습) 기존 Production 보다 좋아야 승격
++    beats_champion = champion_score is None or score < champion_score
++    if score <= RMSE_GATE and beats_champion:
+         v = mlflow.register_model(f"runs:/{run_id}/model", MODEL_NAME)
+-        MlflowClient().transition_model_version_stage(name=MODEL_NAME, version=v.version, stage="Production")
++        MlflowClient().transition_model_version_stage(
++            name=MODEL_NAME, version=v.version, stage="Production", archive_existing_versions=True
++        )  # 🔧 [전력수요 변경] archive_existing_versions=True: 이전 Production 은 Archived 로 내려 1개만 유지
+         result["promoted"] = True
+         result["version"] = v.version
+-        print(f"[GATE PASSED] rmse={score:.2f} -> {MODEL_NAME} v{v.version} promoted to Production")
++        print(f"[GATE PASSED] rmse={score:.1f} GWh -> {MODEL_NAME} v{v.version} promoted to Production")
++    elif not beats_champion:
++        print(f"[GATE FAILED] rmse={score:.1f} >= 기존 Production {champion_score:.1f} -> 배포 차단, 기존 Production 유지")
+     else:
+-        print(f"[GATE FAILED] rmse={score:.2f} > {RMSE_GATE} -> 배포 차단, 기존 Production 유지")
++        print(f"[GATE FAILED] rmse={score:.1f} > {RMSE_GATE} -> 배포 차단, 기존 Production 유지")
+     return result
+ 
+ 
+ def train_and_register(csv_path: str | None = None, rows: list[dict] | None = None) -> dict:
+-    """Day2: 처음부터(scratch) 학습. 데이터가 충분한 base 학습에서만 사용합니다.
+-
+-    csv_path를 지정하지 않으면 data/uploads/에 가장 최근 업로드된 CSV를 사용합니다
+-    (data/storage.py의 latest_upload() - 대시보드에서 업로드한 파일).
+-    """
++    """Day2: 처음부터(scratch) 학습. 데이터가 충분한 base 학습에서만 사용합니다."""
+     if rows is None:
+         rows = load_rows(csv_path or latest_upload())
+-    scaler = HAICScaler.load(SCALER_PATH)
++    scaler = PowerScaler.load(SCALER_PATH)
+     X_train, y_train_scaled, X_test, y_test = _prepare(rows, scaler)
+ 
+     with mlflow.start_run(run_name="base-train"):
+         model = build_model()
+         model.fit(X_train, y_train_scaled, epochs=BASE_EPOCHS, verbose=0)
+ 
+-        preds = [scaler.inverse_close(p) for p in model.predict(X_test, verbose=0).flatten()]
++        preds = _predict(model, X_test, scaler)
+         score = rmse(y_test, preds)
+ 
+         mlflow.log_param("mode", "scratch")
+         mlflow.log_param("epochs", BASE_EPOCHS)
++        mlflow.log_param("seq_len", SEQ_LEN)  # 🔧 [전력수요 변경]
++        mlflow.log_param("n_train", len(X_train))  # 🔧 [전력수요 변경]
++        mlflow.log_param("n_test", len(X_test))  # 🔧 [전력수요 변경]
+         mlflow.log_metric("rmse", score)
++        mlflow.log_metric("mape", mape(y_test, preds))  # 🔧 [전력수요 변경]
+         mlflow.tensorflow.log_model(model, name="model", input_example=X_train[:1])
+ 
+         return _register_if_gate_passed(model, mlflow.active_run().info.run_id, score)
+@@ -96,28 +117,36 @@
+ 
+ def fine_tune(rows: list[dict]) -> dict:
+     """
+-    Day3: 현재 Production 모델 가중치에서 이어서(warm start), 넘겨받은 rows(최근 데이터)로
+-    짧게 fine-tuning합니다. rows가 적을 때(예: 최근 1개월)도 스크래치 학습보다 훨씬 안정적입니다.
++    Day3: 현재 Production 모델 가중치에서 이어서(warm start), 넘겨받은 rows(최근 관측 데이터)로
++    짧게 fine-tuning합니다. rows가 적을 때(예: 최근 4주)도 스크래치 학습보다 훨씬 안정적입니다.
+     """
+-    scaler = HAICScaler.load(SCALER_PATH)
++    scaler = PowerScaler.load(SCALER_PATH)
+     X_train, y_train_scaled, X_test, y_test = _prepare(rows, scaler)
+ 
++    # 🔧 [전력수요 변경] 챔피언(기존 Production)의 같은 평가 구간 RMSE 를 먼저 계산
++    champion = mlflow.tensorflow.load_model(f"models:/{MODEL_NAME}/Production")
++    champion_score = rmse(y_test, _predict(champion, X_test, scaler))
++
+     model = mlflow.tensorflow.load_model(f"models:/{MODEL_NAME}/Production")
+     model.compile(optimizer=keras.optimizers.Adam(learning_rate=FINE_TUNE_LR), loss="mse")
+ 
+     with mlflow.start_run(run_name="fine-tune"):
+         model.fit(X_train, y_train_scaled, epochs=FINE_TUNE_EPOCHS, verbose=0)
+ 
+-        preds = [scaler.inverse_close(p) for p in model.predict(X_test, verbose=0).flatten()]
++        preds = _predict(model, X_test, scaler)
+         score = rmse(y_test, preds)
+ 
+         mlflow.log_param("mode", "fine-tune")
+         mlflow.log_param("epochs", FINE_TUNE_EPOCHS)
+         mlflow.log_param("n_rows", len(rows))
+         mlflow.log_metric("rmse", score)
++        mlflow.log_metric("mape", mape(y_test, preds))  # 🔧 [전력수요 변경]
++        mlflow.log_metric("champion_rmse", champion_score)  # 🔧 [전력수요 변경]
+         mlflow.tensorflow.log_model(model, name="model", input_example=X_train[:1])
+ 
+-        return _register_if_gate_passed(model, mlflow.active_run().info.run_id, score)
++        result = _register_if_gate_passed(model, mlflow.active_run().info.run_id, score, champion_score)
++        result["champion_rmse"] = champion_score  # 🔧 [전력수요 변경]
++        return result
+ 
+ 
+ if __name__ == "__main__":
